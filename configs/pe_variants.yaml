@@ -1,0 +1,80 @@
+# Positional Encoding variants for benchmarking
+
+# BASELINE
+none:
+  name: "No Positional Encoding"
+  type: "none"
+  description: "NoPE - model must infer position from causal masking alone"
+  adds_to_embedding: false
+  modifies_attention: false
+
+# ABSOLUTE ENCODINGS (added to token embeddings)
+learned:
+  name: "Learned Position Embeddings"
+  type: "learned"
+  description: "Trainable embedding lookup table per position (GPT-2 style)"
+  adds_to_embedding: true
+  modifies_attention: false
+  params:
+    max_positions: 2048      # will fail to generalize beyond this
+
+sinusoidal:
+  name: "Sinusoidal (Original)"
+  type: "sinusoidal"
+  description: "Sin/cos waves at different frequencies (Vaswani et al. 2017)"
+  adds_to_embedding: true
+  modifies_attention: false
+  params:
+    base: 10000              # wavelength base
+    interleave: true         # sin/cos interleaved vs concatenated
+
+sinusoidal_sin_only:
+  name: "Sinusoidal (Sin Only)"
+  type: "sinusoidal"
+  description: "Only sine waves, no cosine - tests if cos is necessary"
+  adds_to_embedding: true
+  modifies_attention: false
+  params:
+    base: 10000
+    sin_only: true
+
+binary:
+  name: "Binary Representation"
+  type: "binary"
+  description: "Position encoded as binary bits padded to d_model"
+  adds_to_embedding: true
+  modifies_attention: false
+  params:
+    normalize: true          # scale to [-1, 1] range
+
+decimal_padded:
+  name: "Decimal Padded"
+  type: "decimal"
+  description: "Position as decimal digits, each digit in separate dimension"
+  adds_to_embedding: true
+  modifies_attention: false
+  params:
+    normalize: true
+    num_digits: null         # auto-compute from max_seq_len
+
+integer:
+  name: "Raw Integer"
+  type: "integer"
+  description: "Just add normalized position index to all dimensions"
+  adds_to_embedding: true
+  modifies_attention: false
+  params:
+    normalize: true          # scale by max_seq_len
+    broadcast: true          # same value to all dims vs first dim only
+
+# RELATIVE ENCODINGS (modify attention computation)
+rope:
+  name: "Rotary Position Embedding"
+  type: "rope"
+  description: "Rotate query/key vectors by position-dependent angle (Su et al. 2021)"
+  adds_to_embedding: false
+  modifies_attention: true   # applied in attention mechanism
+  params:
+    base: 10000
+    scaling: null            # for extended context: "linear", "ntk", "yarn"
+    scaling_factor: 1.0
