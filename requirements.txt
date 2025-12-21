@@ -1,5 +1,4 @@
---extra-index-url https://download.pytorch.org/whl/cu121
-
+# base requirements (works on Mac, Linux CPU, etc.)
 torch>=2.0.0
 numpy
 tiktoken

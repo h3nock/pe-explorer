@@ -1,0 +1,11 @@
+# for NVIDIA GPU servers
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+torch>=2.0.0
+numpy
+tiktoken
+datasets
+wandb
+tqdm
+pyyaml
+einops
