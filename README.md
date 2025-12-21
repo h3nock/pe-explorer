@@ -3,8 +3,6 @@
 A benchmark for comparing, experimenting with, and understanding different positional encoding methods in transformer architectures.
 
 ## Goal
-
-Develop a deeper understanding of **how transformers encode and utilize positional information** by:
 1. Training small language models with different positional encodings
 2. Extracting scaling laws to predict behavior at 500B+ parameter scale
 3. Analyzing how different PE methods affect model capabilities
