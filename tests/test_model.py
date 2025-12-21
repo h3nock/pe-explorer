@@ -1,6 +1,7 @@
 """Simple tests for model components."""
 import torch
 from src.model.attention import MultiHeadAttention
+from src.model.mlp import MLP
 
 def test_attention():
     """Test MultiHeadAttention module."""
@@ -52,5 +53,43 @@ def test_attention():
     print("Causal mask test passed!")
     print("All attention tests passed!\n")
 
+
+def test_mlp():
+    """Test MLP module."""
+    print("Testing MLP...")
+    
+    # config
+    batch_size = 2
+    seq_len = 10
+    d_model = 512
+    d_ff = 2048
+    
+    # create module
+    mlp = MLP(d_model=d_model, d_ff=d_ff)
+    
+    # test input
+    x = torch.randn(batch_size, seq_len, d_model)
+    
+    # forward pass
+    out = mlp(x)
+    
+    # check output shape
+    assert out.shape == x.shape, f"Shape mismatch: {out.shape} != {x.shape}"
+    print(f"Input shape:  {x.shape}")
+    print(f"Output shape: {out.shape}")
+    print("Shape test passed!")
+    
+    # check gradients flow
+    loss = out.sum()
+    loss.backward()
+    
+    assert mlp.fc1.weight.grad is not None, "No gradient for fc1"
+    assert mlp.fc2.weight.grad is not None, "No gradient for fc2"
+    print("Gradient test passed!")
+    print("All MLP tests passed!\n")
+
+
 if __name__ == "__main__":
     test_attention()
+    test_mlp()
+
