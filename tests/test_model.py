@@ -3,6 +3,8 @@ import torch
 from src.model.attention import MultiHeadAttention
 from src.model.mlp import MLP
 from src.model.block import TransformerBlock
+from src.model.transformer import Transformer
+from src.model.config import ModelConfig
 
 # test config
 BATCH_SIZE = 2
@@ -10,6 +12,8 @@ SEQ_LEN = 10
 D_MODEL = 512
 N_HEADS = 8
 D_FF = 2048
+VOCAB_SIZE = 1000  # small for testing
+N_LAYERS = 2
 
 
 def test_attention():
@@ -83,7 +87,45 @@ def test_transformer_block():
     print("All TransformerBlock tests passed!\n")
 
 
+def test_transformer():
+    """Test full Transformer model."""
+    print("Testing Transformer...")
+    
+    config = ModelConfig(
+        d_model=D_MODEL,
+        n_heads=N_HEADS,
+        n_layers=N_LAYERS,
+        d_ff=D_FF,
+        max_seq_len=SEQ_LEN,
+        vocab_size=VOCAB_SIZE,
+        tie_embedding=True,
+    )
+    
+    model = Transformer(config)
+    
+    # input is token IDs
+    x = torch.randint(0, VOCAB_SIZE, (BATCH_SIZE, SEQ_LEN))
+    logits = model(x)
+    
+    # shape test
+    expected_shape = (BATCH_SIZE, SEQ_LEN, VOCAB_SIZE)
+    assert logits.shape == expected_shape, f"Shape mismatch: {logits.shape} != {expected_shape}"
+    print(f"Input: {x.shape}, Output: {logits.shape} - Shape test passed!")
+    
+    # weight tying test
+    assert model.lm_head.weight is model.token_embedding.weight, "Weight tying failed!"
+    print("Weight tying test passed!")
+    
+    # gradient test
+    logits.sum().backward()
+    assert model.token_embedding.weight.grad is not None, "No gradient for embeddings"
+    print("Gradient test passed!")
+    print("All Transformer tests passed!\n")
+
+
 if __name__ == "__main__":
     test_attention()
     test_mlp()
     test_transformer_block()
+    test_transformer()
+
