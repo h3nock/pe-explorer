@@ -2,6 +2,8 @@
 import torch
 from src.model.attention import MultiHeadAttention
 from src.model.mlp import MLP
+from src.model.block import TransformerBlock
+
 # test config
 BATCH_SIZE = 2
 SEQ_LEN = 10
@@ -61,7 +63,27 @@ def test_mlp():
     print("All MLP tests passed!\n")
 
 
+def test_transformer_block():
+    """Test TransformerBlock module."""
+    print("Testing TransformerBlock...")
+    
+    block = TransformerBlock(d_model=D_MODEL, n_heads=N_HEADS, d_ff=D_FF)
+    x = torch.randn(BATCH_SIZE, SEQ_LEN, D_MODEL)
+    out = block(x)
+    
+    # shape test
+    assert out.shape == x.shape, f"Shape mismatch: {out.shape} != {x.shape}"
+    print(f"Input: {x.shape}, Output: {out.shape} - Shape test passed!")
+    
+    # gradient test
+    out.sum().backward()
+    assert block.attn.q_proj.weight.grad is not None, "No gradient for attention"
+    assert block.mlp.fc1.weight.grad is not None, "No gradient for mlp"
+    print("Gradient test passed!")
+    print("All TransformerBlock tests passed!\n")
+
+
 if __name__ == "__main__":
     test_attention()
     test_mlp()
-
+    test_transformer_block()
