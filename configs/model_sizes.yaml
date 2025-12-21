@@ -1,0 +1,78 @@
+# Model Size Configurations
+#
+# Design choices:
+#   - d_head = 64 for all sizes (based on the trend that 64 is used for <1B models and 128 for larger models)
+#   - d_ff = 4 × d_model (original transformer ratio even tho some models use 3x or 3.5x)
+#   - n_layers derived from: params ≈ 12 × n_layers × d_model²
+#   - optimal_tokens = 20 × params (Chinchilla scaling)
+#   - learning rate scales down with model size for stability 
+# Most of the choices come from GPT-2, GPT-3, and Chinchilla papers. 
+
+xs:
+  d_model: 128
+  n_layers: 5
+  n_heads: 2       # 128 / 64 = 2
+  d_ff: 512        # 4 × 128
+  max_seq_len: 512
+  optimal_tokens: 20_000_000
+  batch_size: 64
+  learning_rate: 6.0e-4
+
+s:
+  d_model: 256
+  n_layers: 6
+  n_heads: 4       # 256 / 64 = 4
+  d_ff: 1024
+  max_seq_len: 512
+  optimal_tokens: 100_000_000
+  batch_size: 64
+  learning_rate: 5.0e-4
+
+m:
+  d_model: 512
+  n_layers: 8
+  n_heads: 8       # 512 / 64 = 8
+  d_ff: 2048
+  max_seq_len: 1024
+  optimal_tokens: 500_000_000
+  batch_size: 32
+  learning_rate: 3.0e-4
+
+l:
+  d_model: 768
+  n_layers: 14
+  n_heads: 12      # 768 / 64 = 12
+  d_ff: 3072
+  max_seq_len: 1024
+  optimal_tokens: 2_000_000_000
+  batch_size: 32
+  learning_rate: 2.0e-4
+
+xl:
+  d_model: 1024
+  n_layers: 40
+  n_heads: 16      # 1024 / 64 = 16
+  d_ff: 4096
+  max_seq_len: 2048
+  optimal_tokens: 10_000_000_000
+  batch_size: 16
+  learning_rate: 1.0e-4
+
+
+# shared training settings
+training:
+  optimizer: adamw
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  warmup_ratio: 0.01
+  lr_schedule: cosine
+  min_lr_ratio: 0.1
+  grad_clip: 1.0
+  dtype: bfloat16
+
+evaluation:
+  eval_interval: 500
+  eval_tokens: 1_000_000
+  log_interval: 10
+  checkpoint_interval: 5000
