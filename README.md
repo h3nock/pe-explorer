@@ -64,11 +64,7 @@ pos-enc-bench/
 │       ├── trainer.py
 │       └── scaling.py          # scaling law fitting
 ├── experiments/                # experiment scripts
-│   ├── train_all.py
-│   └── analyze_scaling.py
 ├── analysis/                   # notebooks & visualization
-│   ├── scaling_laws.ipynb
-│   └── attention_patterns.ipynb
 └── results/                    # checkpoints, logs, plots
     ├── checkpoints/
     ├── logs/
