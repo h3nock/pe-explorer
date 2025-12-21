@@ -5,12 +5,18 @@ venv/
 # python
 __pycache__/
 *.pyc
+*.egg-info/
+dist/
+build/
+
+# pytest
+.pytest_cache/
 
 # IDE
 .vscode/
 .idea/
 
-# odel checkpoints (large files)
+# model checkpoints (large files)
 results/checkpoints/
 *.pt
 *.pth

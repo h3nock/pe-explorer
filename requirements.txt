@@ -1,9 +1,2 @@
-# base requirements (works on Mac, Linux CPU, etc.)
-torch>=2.0.0
-numpy
-tiktoken
-datasets
-wandb
-tqdm
-pyyaml
-einops
+# installs package with dependencies from pyproject.toml
+-e .
