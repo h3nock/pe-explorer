@@ -7,7 +7,8 @@ import torch.nn as nn
 from torch.optim import AdamW
 import torch.nn.functional as F
 import torch.distributed as dist
-from torch.cuda.amp import GradScaler, autocast 
+from torch.amp import autocast 
+from torch.cuda.amp import GradScaler
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -113,7 +114,7 @@ class Trainer:
         x,y = x.to(self.device), y.to(self.device)
 
         if self.device.type == "cuda":
-            with autocast(device_type="cuda", dtype=self.dtype):
+            with autocast("cuda", dtype=self.dtype):
                 logits = self.model(x) 
                 # compute loss 
                 loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))  
