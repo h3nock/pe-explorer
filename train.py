@@ -10,6 +10,9 @@ from src.model.transformer import Transformer
 from src.data.dataset import get_dataloader
 from src.training.trainer import Trainer, setup_distributed, cleanup_distributed
 
+from dotenv import load_dotenv 
+load_dotenv()
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-size", type=str, default="xs", choices=["xs", "s", "m", "l", "xl"])

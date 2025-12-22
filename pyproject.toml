@@ -12,6 +12,7 @@ dependencies = [
     "wandb",
     "tqdm",
     "pyyaml",
+    "python-dotenv",
 ]
 
 [project.optional-dependencies]
