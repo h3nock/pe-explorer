@@ -63,10 +63,13 @@ def main():
         batch_size=batch_size 
     )
 
+    # unique run name from experiment params
+    run_name = f"{args.model_size}_{args.pe_type}_b{batch_size}_t{total_tokens//1_000_000}M"
+
     if rank == 0: 
         wandb.init(project="pos-enc-bench", 
-        name=f"{args.model_size}_{args.pe_type}", 
-        config={**config,"model_size": args.model_size,  "pe_type": args.pe_type}
+        name=run_name, 
+        config={**config, "model_size": args.model_size, "pe_type": args.pe_type, "batch_size": batch_size, "total_tokens": total_tokens}
         )
     
     warmup_steps = int(training_config["warmup_ratio"] * max_steps) 
@@ -81,7 +84,7 @@ def main():
         warmup_steps=warmup_steps, 
         max_steps=max_steps, 
         checkpoint_interval=all_configs["evaluation"]["checkpoint_interval"],
-        checkpoint_dir=f"checkpoints/{args.model_size}_{args.pe_type}",
+        checkpoint_dir=f"checkpoints/{run_name}",
     )
 
     trainer.train(dataloader, max_steps=max_steps)
