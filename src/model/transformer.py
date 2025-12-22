@@ -4,6 +4,7 @@ from typing import Optional
 
 from src.model.config import ModelConfig
 from src.model.block import TransformerBlock
+from src.encodings import get_pe
 
 class Transformer(nn.Module):
     """Decoder-only Transformer language model.""" 
@@ -14,8 +15,8 @@ class Transformer(nn.Module):
         # token embeddings 
         self.token_embedding = nn.Embedding(config.vocab_size, config.d_model) 
 
-        # positional encoding (will be set later based on pe_type) 
-        self.pe = None  
+        # positional encoding
+        self.pe = get_pe(config.pe_type, config.d_model, config.max_seq_len, **config.pe_params)  
 
         self.blocks = nn.ModuleList([
             TransformerBlock(
@@ -48,12 +49,12 @@ class Transformer(nn.Module):
         # token embeddings 
         x = self.token_embedding(x) 
 
-        # add positional encoding 
-        if self.pe is not None and self.pe.adds_to_embedding: 
+        # add positional encoding (if this PE type adds to embeddings)
+        if self.pe.adds_to_embedding: 
             x = x + self.pe(x.shape[1], x.device) 
 
-        # get RoPE fn if using RoPE (return none by default)
-        rope_fn = None if self.pe is None else self.pe.get_rope_fn() 
+        # get RoPE fn if using RoPE (returns None for non-RoPE types)
+        rope_fn = self.pe.get_rope_fn() 
 
         for block in self.blocks:
             x = block(x, rope_fn=rope_fn)
