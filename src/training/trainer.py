@@ -178,3 +178,7 @@ class Trainer:
             
             if self.step >= max_steps:
                 break 
+        
+        # save final checkpoint
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+        self.save_checkpoint(f"{self.checkpoint_dir}/final.pt")
