@@ -70,6 +70,8 @@ training:
   min_lr_ratio: 0.1
   grad_clip: 1.0
   dtype: bfloat16
+  vocab_size: 50257 
+  dropout: 0.0 
 
 evaluation:
   eval_interval: 500
