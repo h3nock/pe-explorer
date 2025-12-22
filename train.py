@@ -72,7 +72,9 @@ def main():
         config={**config, "model_size": args.model_size, "pe_type": args.pe_type, "batch_size": batch_size, "total_tokens": total_tokens}
         )
     
-    warmup_steps = int(training_config["warmup_ratio"] * max_steps) 
+    warmup_steps = int(training_config["warmup_ratio"] * max_steps)
+    checkpoint_interval = max(max_steps // 5, 100)  # ~5 checkpoints per run
+    
     trainer = Trainer(
         model=model, 
         optimizer=optimizer, 
@@ -83,7 +85,7 @@ def main():
         grad_clip=training_config["grad_clip"], 
         warmup_steps=warmup_steps, 
         max_steps=max_steps, 
-        checkpoint_interval=all_configs["evaluation"]["checkpoint_interval"],
+        checkpoint_interval=checkpoint_interval,
         checkpoint_dir=f"checkpoints/{run_name}",
     )
 
