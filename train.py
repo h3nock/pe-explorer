@@ -18,6 +18,8 @@ def main():
     parser.add_argument("--model-size", type=str, default="xs", choices=["xs", "s", "m", "l", "xl"])
     parser.add_argument("--pe-type", type=str, default="sinusoidal", choices=["none", "sinusoidal"])
     parser.add_argument("--grad-accum-steps", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, default=None, help="Override batch size from config")
+    parser.add_argument("--tokens", type=int, default=None, help="Override total tokens from config")
     args = parser.parse_args()
 
     rank, local_rank, world_size = setup_distributed()
@@ -31,10 +33,11 @@ def main():
     # shared training settings 
     training_config = all_configs["training"]
     
-    batch_size = config["batch_size"]
+    batch_size = args.batch_size or config["batch_size"]
+    total_tokens = args.tokens or config["optimal_tokens"]
     max_seq_len = config["max_seq_len"]
     tokens_per_step = batch_size * max_seq_len * world_size 
-    max_steps = config["optimal_tokens"] // tokens_per_step 
+    max_steps = total_tokens // tokens_per_step 
 
     model_config = ModelConfig(
         d_model=config["d_model"], 
