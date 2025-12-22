@@ -2,25 +2,42 @@
 .venv/
 venv/
 
+# environment variables
+.env
+.env.*
+
 # python
 __pycache__/
 *.pyc
+*.pyo
 *.egg-info/
 dist/
 build/
 
 # pytest
 .pytest_cache/
+.coverage
+htmlcov/
 
 # IDE
 .vscode/
 .idea/
+*.swp
+*.swo
+.DS_Store
 
-# model checkpoints (large files)
-results/checkpoints/
+# model checkpoints (stored in wandb)
+checkpoints/
 *.pt
 *.pth
+*.ckpt
+
+# wandb
+wandb/
 
 # logs
-wandb/
-results/logs/
+logs/
+*.log
+
+# huggingface cache
+.cache/
