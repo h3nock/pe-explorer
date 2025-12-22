@@ -4,7 +4,7 @@ A benchmark for comparing, experimenting with, and understanding different posit
 
 ## Goal
 1. Training small language models with different positional encodings
-2. Extracting scaling laws to predict behavior at 500B+ parameter scale
+2. Extracting scaling laws to predict behavior at larger scale
 3. Analyzing how different PE methods affect model capabilities
 
 ## Experimental Approach
