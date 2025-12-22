@@ -75,7 +75,7 @@ def main():
         warmup_steps=warmup_steps, 
         max_steps=max_steps, 
         checkpoint_interval=all_configs["evaluation"]["checkpoint_interval"],
-        checkpoint_dir="checkpoints",
+        checkpoint_dir=f"checkpoints/{args.model_size}_{args.pe_type}",
     )
 
     trainer.train(dataloader, max_steps=max_steps)
