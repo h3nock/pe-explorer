@@ -2,6 +2,9 @@
 .venv/
 venv/
 
+# downloaded datasets (large files)
+data/
+
 # environment variables
 .env
 .env.*
