@@ -152,6 +152,15 @@ class Trainer:
         total_loss = 0
         start_time = time.time() 
 
+        if self.rank == 0:
+            print(f"\n{'='*60}")
+            print(f"Training started!")
+            print(f"  Device: {self.device}")
+            print(f"  Max steps: {max_steps}")
+            print(f"  Checkpoint interval: {self.checkpoint_interval}")
+            print(f"  Checkpoint dir: {self.checkpoint_dir}")
+            print(f"{'='*60}\n")
+
         for x,y in dataloader:
             loss = self.train_step(x, y)
             total_loss += loss 
