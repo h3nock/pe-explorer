@@ -16,7 +16,7 @@ load_dotenv()
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-size", type=str, default="xs", choices=["xs", "s", "m", "l", "xl"])
-    parser.add_argument("--pe-type", type=str, default="sinusoidal", choices=["none", "sinusoidal"])
+    parser.add_argument("--pe-type", type=str, default="sinusoidal", choices=["none", "sinusoidal", "binary", "decimal"])
     parser.add_argument("--grad-accum-steps", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size from config")
     parser.add_argument("--tokens", type=int, default=None, help="Override total tokens from config")

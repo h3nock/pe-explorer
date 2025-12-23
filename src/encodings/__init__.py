@@ -4,11 +4,15 @@ from typing import Dict, Type
 from src.encodings.base import PositionalEncoding
 from src.encodings.none import NoPE
 from src.encodings.sinusoidal import SinusoidalPE
+from src.encodings.binary import BinaryPE
+from src.encodings.decimal import DecimalPE
 
 
 PE_REGISTRY: Dict[str, Type[PositionalEncoding]] = {
     "none": NoPE,
     "sinusoidal": SinusoidalPE,
+    "binary": BinaryPE,
+    "decimal": DecimalPE,
 }
 
 
