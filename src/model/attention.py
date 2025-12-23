@@ -51,19 +51,12 @@ class MultiHeadAttention(nn.Module):
         if rope_fn is not None:
             q, k = rope_fn(q, k)
         
-        attn_scores = torch.matmul(q, k.transpose(-2, -1)) / self.scale # (batch_size, n_heads, seq_len, seq_len)
-
-        if mask is None:
-            mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device), diagonal=1).bool() 
-
-        attn_scores =attn_scores.masked_fill(mask, -float('inf'))
-
-        # apply attention
-        attn_weights = torch.softmax(attn_scores, dim=-1)
-        attn_weights = self.dropout(attn_weights)
-
-        # compute output
-        out = torch.matmul(attn_weights, v) 
+        # uses FlashAttention on A100/H100, falls back to math on older GPUs 
+        out = torch.nn.functional.scaled_dot_product_attention(
+            q, k, v,
+            dropout_p=self.dropout.p if self.training else 0.0,
+            is_causal=True
+        )
         out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
         return self.out_proj(out)
 
