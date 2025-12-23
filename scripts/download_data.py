@@ -45,11 +45,12 @@ def main():
         "HuggingFaceFW/fineweb-edu",
         name=VARIANTS[args.variant],
         split="train",
+        num_proc=8,  # parallel download
     )
     
     print(f"Saving to {output_path}...")
     output_path.mkdir(parents=True, exist_ok=True)
-    dataset.save_to_disk(str(output_path))
+    dataset.save_to_disk(str(output_path), num_proc=8)  # parallel save
     
     print(f"Done! Dataset saved to {output_path}")
     print("Training will automatically use local data now.")
