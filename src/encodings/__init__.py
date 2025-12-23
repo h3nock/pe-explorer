@@ -1,5 +1,6 @@
 """Positional encoding registry: maps pe_type to PE class."""
-from typing import Dict, Type
+from functools import partial
+from typing import Callable, Dict, Type, Union
 
 from src.encodings.base import PositionalEncoding
 from src.encodings.none import NoPE
@@ -8,11 +9,13 @@ from src.encodings.binary import BinaryPE
 from src.encodings.decimal import DecimalPE
 
 
-PE_REGISTRY: Dict[str, Type[PositionalEncoding]] = {
+PE_REGISTRY: Dict[str, Union[Type[PositionalEncoding], Callable[..., PositionalEncoding]]] = {
     "none": NoPE,
     "sinusoidal": SinusoidalPE,
-    "binary": BinaryPE,
-    "decimal": DecimalPE,
+    "binary": partial(BinaryPE, normalize=False),
+    "binary_norm": partial(BinaryPE, normalize=True),
+    "decimal": partial(DecimalPE, normalize=False),
+    "decimal_norm": partial(DecimalPE, normalize=True),
 }
 
 
