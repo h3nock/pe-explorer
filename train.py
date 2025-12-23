@@ -20,6 +20,8 @@ def main():
     parser.add_argument("--grad-accum-steps", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size from config")
     parser.add_argument("--tokens", type=int, default=None, help="Override total tokens from config")
+    parser.add_argument("--checkpoint-dir", type=str, default=None, help="Custom checkpoint directory")
+    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     args = parser.parse_args()
 
     rank, local_rank, world_size = setup_distributed()
@@ -75,6 +77,8 @@ def main():
     warmup_steps = int(training_config["warmup_ratio"] * max_steps)
     checkpoint_interval = max(max_steps // 5, 100)  # ~5 checkpoints per run
     
+    checkpoint_dir = args.checkpoint_dir or f"checkpoints/{run_name}"
+    
     trainer = Trainer(
         model=model, 
         optimizer=optimizer, 
@@ -86,8 +90,13 @@ def main():
         warmup_steps=warmup_steps, 
         max_steps=max_steps, 
         checkpoint_interval=checkpoint_interval,
-        checkpoint_dir=f"checkpoints/{run_name}",
+        checkpoint_dir=checkpoint_dir,
     )
+
+    if args.resume:
+        trainer.load_checkpoint(args.resume)
+        if rank == 0:
+            print(f"Resumed from {args.resume} at step {trainer.step}")
 
     trainer.train(dataloader, max_steps=max_steps)
 
