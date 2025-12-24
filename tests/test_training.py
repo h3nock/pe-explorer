@@ -31,6 +31,8 @@ def test_trainer_init():
         grad_clip=1.0,
         warmup_steps=10,
         max_steps=100,
+        checkpoint_interval=50,
+        checkpoint_dir="test_checkpoints",
     )
     
     assert trainer.device.type in ["cpu", "mps", "cuda"]
@@ -59,18 +61,52 @@ def test_trainer_step():
         rank=0,
         local_rank=0,
         world_size=1,
+        checkpoint_interval=100,
+        checkpoint_dir="test_checkpoints",
     )
     
     # create dummy batch
     x = torch.randint(0, 1000, (4, 32))  # batch=4, seq=32
     y = torch.randint(0, 1000, (4, 32))
     
-    loss = trainer.train_step(x, y)
+    loss, grad_norm, weight_norm = trainer.train_step(x, y)
     
     assert isinstance(loss, float)
+    assert isinstance(grad_norm, float)
+    assert isinstance(weight_norm, float)
     assert loss > 0
+    assert trainer.step == 1  # step increments after one step with grad_accum_steps=1
+    
+def test_grad_accumulation():
+    """Test gradient accumulation behavior."""
+    config = ModelConfig(d_model=64, n_heads=2, n_layers=2, d_ff=128, max_seq_len=32)
+    model = Transformer(config)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    
+    GRAD_ACCUM = 4
+    trainer = Trainer(
+        model=model,
+        optimizer=optimizer,
+        rank=0, local_rank=0, world_size=1,
+        grad_accum_steps=GRAD_ACCUM,
+        checkpoint_interval=100,
+        checkpoint_dir="test_checkpoints",
+    )
+    
+    x = torch.randint(0, 1000, (4, 32))
+    y = torch.randint(0, 1000, (4, 32))
+    
+    # step 1-3: this should NOT increment step
+    for i in range(GRAD_ACCUM - 1):
+        loss, _, _ = trainer.train_step(x, y)
+        assert trainer.step == 0
+        assert trainer.micro_step == i + 1
+        
+    # step 4: should increment step
+    loss, _, _ = trainer.train_step(x, y)
     assert trainer.step == 1
-    print(f"Train step loss: {loss:.4f}")
+    assert trainer.micro_step == GRAD_ACCUM
+    print(f"Gradient accumulation test passed (steps: {GRAD_ACCUM})")
 
 
 def test_lr_schedule():
@@ -85,6 +121,8 @@ def test_lr_schedule():
         rank=0, local_rank=0, world_size=1,
         warmup_steps=10,
         max_steps=100,
+        checkpoint_interval=50,
+        checkpoint_dir="test_checkpoints",
     )
     
     # warmup: LR should increase
@@ -109,4 +147,6 @@ if __name__ == "__main__":
     test_trainer_init()
     test_trainer_step()
     test_lr_schedule()
+    test_grad_accumulation()
+    test_token_tracking()
     print("\nAll training tests passed!")

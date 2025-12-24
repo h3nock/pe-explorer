@@ -22,6 +22,7 @@ def main():
     parser.add_argument("--tokens", type=int, default=None, help="Override total tokens from config")
     parser.add_argument("--checkpoint-dir", type=str, default=None, help="Custom checkpoint directory")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
+    parser.add_argument("--log-interval", type=int, default=None, help="Override log interval from config")
     args = parser.parse_args()
 
     rank, local_rank, world_size = setup_distributed()
@@ -38,8 +39,10 @@ def main():
     batch_size = args.batch_size or config["batch_size"]
     total_tokens = args.tokens or config["optimal_tokens"]
     max_seq_len = config["max_seq_len"]
-    tokens_per_step = batch_size * max_seq_len * world_size 
-    max_steps = total_tokens // tokens_per_step 
+    
+    effective_batch_size = batch_size * world_size * args.grad_accum_steps
+    tokens_per_step = effective_batch_size * max_seq_len
+    max_steps = total_tokens // tokens_per_step
 
     model_config = ModelConfig(
         d_model=config["d_model"], 
@@ -62,12 +65,13 @@ def main():
 
     dataloader = get_dataloader(
         seq_len=max_seq_len,  
-        batch_size=batch_size 
+        batch_size=batch_size,
+        rank=rank,
+        world_size=world_size
     )
 
     # unique run name from experiment params
-    effective_batch = batch_size * world_size * args.grad_accum_steps
-    run_name = f"{args.model_size}_{args.pe_type}_eb{effective_batch}_t{total_tokens//1_000_000}M"
+    run_name = f"{args.model_size}_{args.pe_type}_eb{effective_batch_size}_t{total_tokens//1_000_000}M"
 
     if rank == 0: 
         wandb.init(project="pos-enc-bench", 
@@ -99,7 +103,10 @@ def main():
         if rank == 0:
             print(f"Resumed from {args.resume} at step {trainer.step}")
 
-    trainer.train(dataloader, max_steps=max_steps)
+    eval_config = all_configs.get("evaluation", {})
+    log_interval = args.log_interval or eval_config.get("log_interval", 10)
+
+    trainer.train(dataloader, max_steps=max_steps, log_interval=log_interval)
 
     if rank == 0:
         wandb.finish()

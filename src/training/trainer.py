@@ -70,7 +70,9 @@ class Trainer:
             self.model = model 
         
         self.optimizer = optimizer
-        self.step = 0
+        self.step = 0        # optimizer update count
+        self.micro_step = 0  # iteration count (for grad accumulation)
+        self.consumed_tokens = 0 # total tokens processed
     
     def get_lr(self, step: int) -> float:
         """cosine LR with linear warmup"""
@@ -86,6 +88,8 @@ class Trainer:
         
         checkpoint = {
             'step': self.step,
+            'micro_step': self.micro_step,
+            'consumed_tokens': self.consumed_tokens,
             'model_state_dict': self.model.module.state_dict() if hasattr(self.model, 'module') else self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
         }
@@ -105,18 +109,22 @@ class Trainer:
         
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.step = checkpoint['step']
+        self.micro_step = checkpoint.get('micro_step', self.step * self.grad_accum_steps)
+        self.consumed_tokens = checkpoint.get('consumed_tokens', 0)
         
         if self.scaler is not None and 'scaler_state_dict' in checkpoint:
             self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
     
-    def train_step(self, x: torch.Tensor, y: torch.Tensor) -> float:
-        """single training step with gradient accumulation."""
-        x,y = x.to(self.device), y.to(self.device)
+    def train_step(self, x: torch.Tensor, y: torch.Tensor) -> tuple[float, float, float]:
+        """Single training step with gradient accumulation.
+        
+        note: self.step counts optimizer updates (not iterations).
+        """
+        x, y = x.to(self.device), y.to(self.device)
 
         if self.device.type == "cuda":
             with autocast("cuda", dtype=self.dtype):
                 logits = self.model(x) 
-                # compute loss 
                 loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))  
         else:
             logits = self.model(x)
@@ -132,75 +140,109 @@ class Trainer:
         grad_norm = 0.0
         weight_norm = 0.0
 
-        if (self.step + 1) % self.grad_accum_steps == 0:
+        self.micro_step += 1
+        
+        # only update weights every grad_accum_steps
+        if self.micro_step % self.grad_accum_steps == 0:
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = self.get_lr(self.step)
 
             if self.scaler:
                 self.scaler.unscale_(self.optimizer) 
-                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(),self.grad_clip)
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip).item()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
-                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip).item()
                 self.optimizer.step() 
             
-            # calculate weight norm 
             with torch.no_grad():
                 weight_norm = sum(p.norm(2).item() ** 2 for p in self.model.parameters()) ** 0.5
 
-            self.optimizer.zero_grad() 
+            self.optimizer.zero_grad()
+            self.step += 1  # step = optimizer update count
         
-        self.step += 1 
         return loss.item() * self.grad_accum_steps, grad_norm, weight_norm
     
     def train(self, dataloader, max_steps: int, log_interval: int = 100):
-        self.model.train() # sets the mode to training 
-        self.optimizer.zero_grad() 
-        total_loss = 0
-        start_time = time.time() 
+        """Train the model.
+        
+        Args:
+            max_steps: Number of optimizer updates (not iterations)
+            log_interval: Log every N optimizer steps
+        """
+        self.model.train()
+        self.optimizer.zero_grad()
+        
+        # accumulators (reset every log_interval steps)
+        accum_loss = 0.0
+        steps_since_log = 0
+        tokens_since_log = 0
+        start_time = time.time()
+        
+        # per-step tracking (reset every optimizer step)
+        step_loss = 0.0
+        last_grad_norm = 0.0
+        last_weight_norm = 0.0
 
         if self.rank == 0:
             print(f"\n{'='*60}")
             print(f"Training started!")
             print(f"  Device: {self.device}")
             print(f"  Max steps: {max_steps}")
+            print(f"  Grad accum steps: {self.grad_accum_steps}")
             print(f"  Checkpoint interval: {self.checkpoint_interval}")
             print(f"  Checkpoint dir: {self.checkpoint_dir}")
             print(f"{'='*60}\n")
 
-        for x,y in dataloader:
+        for x, y in dataloader:
             loss, grad_norm, weight_norm = self.train_step(x, y)
-            total_loss += loss 
-
-            if self.step % log_interval == 0:
-                avg_loss = total_loss / log_interval
-                elapsed = time.time() - start_time 
-                tokens_per_sec = (x.numel() * log_interval * self.world_size) / elapsed 
-
-                if self.rank == 0:
-                    log_dict = {
-                        "train/loss": avg_loss,
-                        "train/tokens_per_sec": tokens_per_sec,
-                        "train/step": self.step,
-                        "train/lr": self.get_lr(self.step), 
-                    }
-                    if grad_norm > 0:
-                        log_dict["train/grad_norm"] = grad_norm
-                    if weight_norm > 0:
-                        log_dict["param/weight_norm"] = weight_norm
-                        
-                    wandb.log(log_dict)
+            step_loss += loss  # accumulate across grad_accum iterations
+            current_tokens = x.numel() * self.world_size
+            tokens_since_log += current_tokens
+            self.consumed_tokens += current_tokens
             
-                total_loss = 0
-                start_time = time.time()
-            
-            if self.step % self.checkpoint_interval == 0 and self.step > 0:
-                os.makedirs(self.checkpoint_dir, exist_ok=True) 
-                self.save_checkpoint(f"{self.checkpoint_dir}/step_{self.step}.pt")
-            
-            if self.step >= max_steps:
-                break 
+            # check if optimizer step happened
+            if grad_norm > 0:
+                # this was an optimizer step
+                # step_loss contains SUM of losses from micro-batches
+                # we want AVERAGE loss for the effective batch
+                accum_loss += (step_loss / self.grad_accum_steps)
+                steps_since_log += 1
+                last_grad_norm = grad_norm
+                last_weight_norm = weight_norm
+                step_loss = 0.0  # reset for next step
+                
+                # log every log_interval optimizer steps
+                if self.step % log_interval == 0 and self.step > 0:
+                    elapsed = time.time() - start_time
+                    avg_loss = accum_loss / steps_since_log
+                    tokens_per_sec = tokens_since_log / elapsed
+                    
+                    if self.rank == 0:
+                        wandb.log({
+                            "train/loss": avg_loss,
+                            "train/tokens_per_sec": tokens_per_sec,
+                            "train/step": self.step,
+                            "train/tokens": self.consumed_tokens, 
+                            "train/lr": self.get_lr(self.step),
+                            "train/grad_norm": last_grad_norm,
+                            "param/weight_norm": last_weight_norm,
+                        })
+                    
+                    # reset accumulators
+                    accum_loss = 0.0
+                    steps_since_log = 0
+                    tokens_since_log = 0
+                    start_time = time.time()
+                
+                # checkpoint
+                if self.step % self.checkpoint_interval == 0 and self.step > 0:
+                    os.makedirs(self.checkpoint_dir, exist_ok=True)
+                    self.save_checkpoint(f"{self.checkpoint_dir}/step_{self.step}.pt")
+                
+                if self.step >= max_steps:
+                    break
         
         # save final checkpoint
         os.makedirs(self.checkpoint_dir, exist_ok=True)
