@@ -129,22 +129,30 @@ class Trainer:
         else:
             loss.backward() 
 
+        grad_norm = 0.0
+        weight_norm = 0.0
+
         if (self.step + 1) % self.grad_accum_steps == 0:
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = self.get_lr(self.step)
 
             if self.scaler:
                 self.scaler.unscale_(self.optimizer) 
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(),self.grad_clip)
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(),self.grad_clip)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
                 self.optimizer.step() 
+            
+            # calculate weight norm 
+            with torch.no_grad():
+                weight_norm = sum(p.norm(2).item() ** 2 for p in self.model.parameters()) ** 0.5
+
             self.optimizer.zero_grad() 
         
         self.step += 1 
-        return loss.item() * self.grad_accum_steps
+        return loss.item() * self.grad_accum_steps, grad_norm, weight_norm
     
     def train(self, dataloader, max_steps: int, log_interval: int = 100):
         self.model.train() # sets the mode to training 
@@ -162,7 +170,7 @@ class Trainer:
             print(f"{'='*60}\n")
 
         for x,y in dataloader:
-            loss = self.train_step(x, y)
+            loss, grad_norm, weight_norm = self.train_step(x, y)
             total_loss += loss 
 
             if self.step % log_interval == 0:
@@ -171,12 +179,18 @@ class Trainer:
                 tokens_per_sec = (x.numel() * log_interval * self.world_size) / elapsed 
 
                 if self.rank == 0:
-                    wandb.log({
+                    log_dict = {
                         "train/loss": avg_loss,
                         "train/tokens_per_sec": tokens_per_sec,
                         "train/step": self.step,
                         "train/lr": self.get_lr(self.step), 
-                    })
+                    }
+                    if grad_norm > 0:
+                        log_dict["train/grad_norm"] = grad_norm
+                    if weight_norm > 0:
+                        log_dict["param/weight_norm"] = weight_norm
+                        
+                    wandb.log(log_dict)
             
                 total_loss = 0
                 start_time = time.time()
