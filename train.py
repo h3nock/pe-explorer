@@ -66,7 +66,8 @@ def main():
     )
 
     # unique run name from experiment params
-    run_name = f"{args.model_size}_{args.pe_type}_b{batch_size}_t{total_tokens//1_000_000}M"
+    effective_batch = batch_size * world_size * args.grad_accum_steps
+    run_name = f"{args.model_size}_{args.pe_type}_eb{effective_batch}_t{total_tokens//1_000_000}M"
 
     if rank == 0: 
         wandb.init(project="pos-enc-bench", 
