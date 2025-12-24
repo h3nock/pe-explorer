@@ -3,7 +3,7 @@
 venv/
 
 # downloaded datasets (large files)
-data/
+/data/
 
 # environment variables
 .env
