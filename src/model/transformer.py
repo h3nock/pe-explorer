@@ -18,6 +18,9 @@ class Transformer(nn.Module):
         # positional encoding
         self.pe = get_pe(config.pe_type, config.d_model, config.max_seq_len, **config.pe_params)  
 
+        # initialize embeddings 
+        self.token_embedding.weight.data.normal_(mean=0.0, std=0.02)
+
         self.blocks = nn.ModuleList([
             TransformerBlock(
                 d_model=config.d_model,
