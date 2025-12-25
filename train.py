@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Training script for positional encoding benchmark."""
 import argparse
+import random
 import yaml
+import numpy as np
+import torch
 import wandb
 from torch.optim.adamw import AdamW
 
@@ -20,6 +23,7 @@ def main():
     parser.add_argument("--grad-accum-steps", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size from config")
     parser.add_argument("--tokens", type=int, default=None, help="Override total tokens from config")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--checkpoint-dir", type=str, default=None, help="Custom checkpoint directory")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     parser.add_argument("--log-interval", type=int, default=None, help="Override log interval from config")
@@ -73,7 +77,15 @@ def main():
         rank=rank,
         world_size=world_size
     )
-
+    seed = args.seed
+    
+    # set seeds for reproducibility
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    
     warmup_steps = training_config.get("warmup_steps", 2000)
     # schedule_type is implicit: "wsd"
     wsd_stage = args.wsd_stage or training_config.get("wsd_stage", "full")
