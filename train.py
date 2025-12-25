@@ -99,7 +99,7 @@ def main():
     )
 
     if args.resume:
-        trainer.load_checkpoint(args.resume)
+        trainer.load_checkpoint(args.resume, dataloader)
         if rank == 0:
             print(f"Resumed from {args.resume} at step {trainer.step}")
 

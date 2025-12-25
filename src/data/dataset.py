@@ -1,7 +1,8 @@
 import os
 from pathlib import Path
 import torch 
-from torch.utils.data import IterableDataset, DataLoader 
+from torch.utils.data import IterableDataset
+from torchdata.stateful_dataloader import StatefulDataLoader
 import tiktoken 
 from datasets import load_dataset, load_from_disk
 
@@ -72,8 +73,10 @@ def get_dataloader(
     num_workers: int = 4,
     rank: int = 0,
     world_size: int = 1,
-) -> DataLoader:
-    """Create a DataLoader for FineWeb-Edu.
+) -> StatefulDataLoader:
+    """Create a StatefulDataLoader for FineWeb-Edu.
+    
+    StatefulDataLoader supports state_dict()/load_state_dict() for checkpoint resumption.
     
     Args:
         seq_len: Sequence length for training
@@ -84,7 +87,7 @@ def get_dataloader(
         world_size: Distributed world size
     """ 
     dataset = FineWebEduDataset(seq_len=seq_len, variant=variant, rank=rank, world_size=world_size) 
-    return DataLoader(
+    return StatefulDataLoader(
         dataset, 
         batch_size=batch_size, 
         num_workers=num_workers, 

@@ -1,8 +1,10 @@
 import os
 import time
 import math
+import random
 import torch
 import wandb
+import numpy as np
 import torch.nn as nn
 from torch.optim import AdamW
 import torch.nn.functional as F
@@ -81,8 +83,8 @@ class Trainer:
         else:
             progress = (step - self.warmup_steps) / max(1, self.max_steps - self.warmup_steps) 
             return self.base_lr * 0.5 * ( 1 + math.cos(math.pi * progress))
-    def save_checkpoint(self, path: str):
-        """Save training checkpoint."""
+    def save_checkpoint(self, path: str, dataloader=None):
+        """Save training checkpoint with optional dataloader state for exact resumption."""
         if self.rank != 0:
             return  # only rank 0 saves
         
@@ -92,15 +94,26 @@ class Trainer:
             'consumed_tokens': self.consumed_tokens,
             'model_state_dict': self.model.module.state_dict() if hasattr(self.model, 'module') else self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
+            # RNG states for reproducibility
+            'rng_state': {
+                'python': random.getstate(),
+                'numpy': np.random.get_state(),
+                'torch': torch.get_rng_state(),
+                'cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            },
         }
         if self.scaler is not None:
             checkpoint['scaler_state_dict'] = self.scaler.state_dict()
         
+        # save dataloader state if provided (StatefulDataLoader)
+        if dataloader is not None and hasattr(dataloader, 'state_dict'):
+            checkpoint['dataloader_state'] = dataloader.state_dict()
+        
         torch.save(checkpoint, path)
     
-    def load_checkpoint(self, path: str):
-        """Load training checkpoint."""
-        checkpoint = torch.load(path, map_location=self.device)
+    def load_checkpoint(self, path: str, dataloader=None):
+        """Load training checkpoint and restore dataloader state if available."""
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         
         if hasattr(self.model, 'module'):
             self.model.module.load_state_dict(checkpoint['model_state_dict'])
@@ -114,6 +127,20 @@ class Trainer:
         
         if self.scaler is not None and 'scaler_state_dict' in checkpoint:
             self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        
+        # restore RNG states for reproducibility
+        if 'rng_state' in checkpoint:
+            rng = checkpoint['rng_state']
+            random.setstate(rng['python'])
+            np.random.set_state(rng['numpy'])
+            torch.set_rng_state(rng['torch'])
+            if rng['cuda'] is not None and torch.cuda.is_available():
+                torch.cuda.set_rng_state_all(rng['cuda'])
+        
+        # restore dataloader state if provided
+        if dataloader is not None and 'dataloader_state' in checkpoint:
+            if hasattr(dataloader, 'load_state_dict'):
+                dataloader.load_state_dict(checkpoint['dataloader_state'])
     
     def train_step(self, x: torch.Tensor, y: torch.Tensor) -> tuple[float, float, float]:
         """Single training step with gradient accumulation.
@@ -239,11 +266,11 @@ class Trainer:
                 # checkpoint
                 if self.step % self.checkpoint_interval == 0 and self.step > 0:
                     os.makedirs(self.checkpoint_dir, exist_ok=True)
-                    self.save_checkpoint(f"{self.checkpoint_dir}/step_{self.step}.pt")
+                    self.save_checkpoint(f"{self.checkpoint_dir}/step_{self.step}.pt", dataloader)
                 
                 if self.step >= max_steps:
                     break
         
         # save final checkpoint
         os.makedirs(self.checkpoint_dir, exist_ok=True)
-        self.save_checkpoint(f"{self.checkpoint_dir}/final.pt")
+        self.save_checkpoint(f"{self.checkpoint_dir}/final.pt", dataloader)
