@@ -33,7 +33,7 @@ def cleanup_distributed():
 
 
 class Trainer: 
-    def __init__(self, model: nn.Module, optimizer: torch.optim.Optimizer, rank: int, local_rank: int, world_size: int, grad_accum_steps: int = 1, grad_clip: float = 1.0, warmup_steps: int = 100, max_steps: int = 10000, checkpoint_interval: int = 5000, checkpoint_dir: str = "checkpoints"):
+    def __init__(self, model: nn.Module, optimizer: torch.optim.Optimizer, rank: int, local_rank: int, world_size: int, grad_accum_steps: int = 1, grad_clip: float = 1.0, warmup_steps: int = 2000, max_steps: int = 10000, checkpoint_interval: int = 5000, checkpoint_dir: str = "checkpoints", wsd_stage: str = "full", decay_steps: int = 0, target_checkpoints: list[int] = None, wandb_manager=None, run_ids: dict = None):
         self.rank = rank 
         self.local_rank = local_rank 
         self.world_size = world_size 
@@ -44,6 +44,10 @@ class Trainer:
         self.base_lr = optimizer.defaults['lr'] 
         self.checkpoint_interval = checkpoint_interval
         self.checkpoint_dir = checkpoint_dir
+        # WSD scheduler parameters
+        self.wsd_stage = wsd_stage
+        self.decay_steps = decay_steps
+        self.decay_start_step = None # set in train()
 
         if torch.cuda.is_available():
             # move model to GPU 
@@ -77,12 +81,33 @@ class Trainer:
         self.consumed_tokens = 0 # total tokens processed
     
     def get_lr(self, step: int) -> float:
-        """cosine LR with linear warmup"""
-        if step < self.warmup_steps:
-            return self.base_lr * (step / self.warmup_steps) 
+        """Calculate learning rate based on WSD schedule."""
+        if self.wsd_stage == "full":
+            # Warmup -> Constant -> Decay (all in one go)
+            decay_start = self.max_steps - self.decay_steps
+            
+            if step < self.warmup_steps:
+                return self.base_lr * (step / self.warmup_steps)
+            elif step < decay_start:
+                return self.base_lr
+            else:
+                # decay phase
+                progress = (step - decay_start) / max(1, self.decay_steps)
+                progress = min(1.0, max(0.0, progress))
+                return self.base_lr * (1.0 - progress)
+
+        elif self.wsd_stage == "decay_only":
+            # linear decay from base_lr to 0 over decay_steps
+            # we start decaying from self.decay_start_step
+            if self.decay_start_step is None:
+                return self.base_lr # fallback if not set yet
+            
+            info_step = step - self.decay_start_step
+            progress = info_step / max(1, self.decay_steps)
+            progress = min(1.0, max(0.0, progress))
+            return self.base_lr * (1.0 - progress)
         else:
-            progress = (step - self.warmup_steps) / max(1, self.max_steps - self.warmup_steps) 
-            return self.base_lr * 0.5 * ( 1 + math.cos(math.pi * progress))
+            return self.base_lr # fallback
     def save_checkpoint(self, path: str, dataloader=None):
         """Save training checkpoint with optional dataloader state for exact resumption."""
         if self.rank != 0:
@@ -209,14 +234,20 @@ class Trainer:
         
         # per-step tracking (reset every optimizer step)
         step_loss = 0.0
-        last_grad_norm = 0.0
-        last_weight_norm = 0.0
+        if self.wsd_stage == "decay_only" and self.decay_start_step is None:
+            self.decay_start_step = self.step
+            if self.rank == 0:
+                print(f"Starting WSD decay phase from step {self.step} for {self.decay_steps} steps")
 
         if self.rank == 0:
             print(f"\n{'='*60}")
             print(f"Training started!")
+            print(f"  Schedule: WSD ({self.wsd_stage})")
+            
+            tokens_per_step = self.grad_accum_steps * self.world_size * dataloader.batch_size * dataloader.dataset.seq_len
             print(f"  Device: {self.device}")
-            print(f"  Max steps: {max_steps}")
+            print(f"  Tokens per step: {tokens_per_step:,}")
+            print(f"  Max steps: {max_steps:,} ({max_steps * tokens_per_step / 1e9:.2f}B tokens)")
             print(f"  Grad accum steps: {self.grad_accum_steps}")
             print(f"  Checkpoint interval: {self.checkpoint_interval}")
             print(f"  Checkpoint dir: {self.checkpoint_dir}")

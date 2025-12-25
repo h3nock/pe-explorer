@@ -23,6 +23,10 @@ def main():
     parser.add_argument("--checkpoint-dir", type=str, default=None, help="Custom checkpoint directory")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     parser.add_argument("--log-interval", type=int, default=None, help="Override log interval from config")
+    
+    # WSD scheduler args (CLI overrides config)
+    parser.add_argument("--wsd-stage", type=str, default=None, choices=["decay_only", "full"], help="WSD stage (overrides config)")
+    parser.add_argument("--decay-tokens", type=int, default=None, help="Number of tokens for WSD decay phase")
     args = parser.parse_args()
 
     rank, local_rank, world_size = setup_distributed()
@@ -70,20 +74,17 @@ def main():
         world_size=world_size
     )
 
-    # unique run name from experiment params
-    run_name = f"{args.model_size}_{args.pe_type}_eb{effective_batch_size}_t{total_tokens//1_000_000}M"
-
-    if rank == 0: 
-        wandb.init(project="pos-enc-bench", 
-        name=run_name, 
-        config={**config, "model_size": args.model_size, "pe_type": args.pe_type, "batch_size": batch_size, "total_tokens": total_tokens}
-        )
-    
-    warmup_steps = int(training_config["warmup_ratio"] * max_steps)
-    checkpoint_interval = max(max_steps // 5, 100)  # ~5 checkpoints per run
-    
-    checkpoint_dir = args.checkpoint_dir or f"checkpoints/{run_name}"
-    
+    warmup_steps = training_config.get("warmup_steps", 2000)
+    # schedule_type is implicit: "wsd"
+    wsd_stage = args.wsd_stage or training_config.get("wsd_stage", "full")
+    # calculate decay steps based on stage
+    # full: auto 10% of max_token_budget
+    # decay_only: requires --decay-tokens
+    if wsd_stage == "full":
+        decay_steps = int(0.1 * max_steps) # 10% of total budget
+        if rank == 0:
+            decay_tokens = decay_steps * tokens_per_step
+            print(f"WSD Full: Decay phase = 10% ({decay_tokens:,} tokens / {decay_steps} steps)")
     trainer = Trainer(
         model=model, 
         optimizer=optimizer, 
@@ -96,12 +97,26 @@ def main():
         max_steps=max_steps, 
         checkpoint_interval=checkpoint_interval,
         checkpoint_dir=checkpoint_dir,
+        wsd_stage=wsd_stage,
+        decay_steps=decay_steps,
     )
 
     if args.resume:
         trainer.load_checkpoint(args.resume, dataloader)
         if rank == 0:
             print(f"Resumed from {args.resume} at step {trainer.step}")
+
+    # WSD decay logic: reset max_steps relative to current step
+    if wsd_stage == "decay_only":
+        if args.decay_tokens:
+            decay_steps = args.decay_tokens // tokens_per_step
+        else:
+            raise ValueError("For WSD decay_only stage, you must provide --decay-tokens")
+        
+        trainer.decay_steps = decay_steps
+        trainer.max_steps = trainer.step + decay_steps
+        if rank == 0:
+            print(f"WSD decay only: Training for {decay_steps} steps (stopping at step {trainer.max_steps})")
 
     eval_config = all_configs.get("evaluation", {})
     log_interval = args.log_interval or eval_config.get("log_interval", 10)
