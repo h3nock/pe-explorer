@@ -170,7 +170,7 @@ def parse_args():
 
 
 def load_configs(model_size):
-    with open("configs/model_sizes.yaml") as f:
+    with open("configs/config.yaml") as f:
         all_configs = yaml.safe_load(f)
     return all_configs[model_size], all_configs["training"], all_configs.get("evaluation", {})
 

@@ -1,4 +1,4 @@
-# Model Size Configurations
+# Configurations
 #
 # Design choices:
 #   - d_head = 64 for all sizes (based on the trend that 64 is used for <1B models and 128 for larger models)
@@ -71,8 +71,8 @@ training:
   beta1: 0.9
   beta2: 0.95
   warmup_steps: 2000 
-  wsd_stage: full
-  decay_ratio: 0.1     # decay phase = 10% of budget, branch at 90%
+  wsd_stage: full     # Options: 'full' (warmup + stable + 10% auto-decay), 'decay_only' (resume & 10% decay)
+  decay_tokens: null  # auto-calculated (10%) if null
   grad_clip: 1.0
   dtype: bfloat16
   vocab_size: 50257 
@@ -83,3 +83,12 @@ evaluation:
   eval_tokens: 1_000_000
   log_interval: 10
   checkpoint_interval: 5000
+
+data:
+  mix_ratio:
+    fineweb: 0.9
+    algorithmic: 0.1
+  algorithmic:
+    train_path: "data/algorithmic/train.parquet"
+    eval_path: "data/algorithmic/eval.parquet"
+    col_name: "text"
