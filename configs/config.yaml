@@ -1,0 +1,92 @@
+# Model and Training Configurations
+#
+# Design principles:
+#   - d_head = 64 for all sizes (2024 best practice for <1B models)
+#   - d_ff = 4 × d_model (standard transformer ratio)
+#   - n_layers derived from: params ≈ 12 × n_layers × d_model²
+#   - Chinchilla-optimal: 20 tokens per parameter (Budget A), 40N (Budget B)
+#   - Based on Pythia, SmolLM, MobileLLM papers
+
+tiny:
+  d_model: 512
+  n_layers: 6
+  n_heads: 8         # 512 / 64 = 8
+  d_ff: 2048         # 4 × 512
+  max_seq_len: 2048
+  max_token_budget: 2_800_000_000
+  batch_size: 64
+  learning_rate: 6.0e-4
+  target_budgets: [1_400_000_000, 2_800_000_000]  # 20N (~70M), 40N
+
+small:
+  d_model: 768
+  n_layers: 12
+  n_heads: 12        # 768 / 64 = 12
+  d_ff: 3072         # 4 × 768
+  max_seq_len: 2048
+  max_token_budget: 6_400_000_000
+  batch_size: 32
+  learning_rate: 3.0e-4
+  target_budgets: [3_200_000_000, 6_400_000_000]  # 20N (~160M), 40N
+
+medium:
+  d_model: 1024
+  n_layers: 24
+  n_heads: 16        # 1024 / 64 = 16
+  d_ff: 4096         # 4 × 1024
+  max_seq_len: 2048
+  max_token_budget: 16_400_000_000
+  batch_size: 16
+  learning_rate: 2.0e-4
+  target_budgets: [8_200_000_000, 16_400_000_000]  # 20N (~410M), 40N
+
+large:
+  d_model: 2048
+  n_layers: 16
+  n_heads: 32        # 2048 / 64 = 32
+  d_ff: 8192         # 4 × 2048
+  max_seq_len: 2048
+  max_token_budget: 40_000_000_000
+  batch_size: 8
+  learning_rate: 1.0e-4
+  target_budgets: [20_000_000_000, 40_000_000_000]  # 20N (~1B), 40N
+
+
+# shared training settings
+training:
+  optimizer: adamw
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  warmup_steps: 2000 
+  wsd_stage: full     # Options: 'full' (warmup + stable + 10% auto-decay), 'decay_only' (resume & 10% decay)
+  decay_tokens: null  # auto-calculated (10%) if null
+  grad_clip: 1.0
+  dtype: bfloat16
+  vocab_size: 50257 
+  dropout: 0.0 
+
+evaluation:
+  eval_interval: 500
+  eval_tokens: 1_000_000
+  log_interval: 10
+  checkpoint_interval: 5000
+
+data:
+  # fineWeb-Edu source (karpathy's pre-shuffled version)
+  fineweb:
+    repo: "karpathy/fineweb-edu-100b-shuffle"
+    total_shards: 1822           # total available (100B tokens)
+    download_shards: 911         # our default download (50B tokens, ~89GB)
+    tokens_per_shard: 55_000_000 # ~55M tokens per shard
+    tokenized_path: "~/.cache/fineweb-edu/tokenized"
+  
+  # mixed training 
+  mix_ratio:
+    fineweb: 0.9
+    algorithmic: 0.1
+  algorithmic:
+    train_path: "data/algorithmic/train.parquet"
+    eval_path: "data/algorithmic/eval.parquet"
+    tokenized_path: "data/algorithmic_bin"
+    col_name: "text"

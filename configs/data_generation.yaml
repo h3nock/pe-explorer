@@ -1,0 +1,30 @@
+# Synthetic Data Generation Config
+
+tasks:
+  addition:
+    weight: 0.4
+    train_range: [1, 20]   # number of digits per operand
+    eval_range: [21, 40]   # extrapolation: longer than training
+    
+  sorting:
+    weight: 0.3
+    train_range: [1, 10]   # number of items to sort
+    eval_range: [11, 20]
+    
+  reversal:
+    weight: 0.2
+    train_range: [1, 20]   # string length (characters)
+    eval_range: [21, 40]
+    
+  copy:
+    weight: 0.1
+    train_range: [1, 50]   # string length (characters)
+    eval_range: [51, 100]
+
+# Generation Settings
+generation:
+  output_dir: data/algorithmic
+  train_seed: 42           # fixed seed for reproducibility
+  eval_seed: 123           # different seed to avoid train/eval overlap
+  default_train_examples: 1000000
+  default_eval_per_task: 1000

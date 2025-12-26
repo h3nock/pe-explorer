@@ -29,7 +29,7 @@ if mp.get_start_method(allow_none=True) != "spawn":
 def main():
     args = parse_args()
     rank, local_rank, world_size = setup_distributed()
-    config, training_config, eval_config = load_configs(args.model_size)
+    config, training_config, eval_config, data_config = load_configs(args.model_size)
     
     wsd_stage = args.wsd_stage or training_config.get("wsd_stage", "full")
     
@@ -52,7 +52,15 @@ def main():
         torch.cuda.manual_seed_all(seed)
     
     model, optimizer = create_model_and_optimizer(config, training_config, args)
-    dataloader = get_dataloader(seq_len=max_seq_len, batch_size=batch_size, rank=rank, world_size=world_size)
+    dataloader = get_dataloader(
+        seq_len=max_seq_len, 
+        batch_size=batch_size, 
+        token_budget=max_token_budget,
+        data_config=data_config,
+        rank=rank, 
+        world_size=world_size,
+        seed=seed,
+    )
     
     effective_batch_size = batch_size * world_size * args.grad_accum_steps
     tokens_per_step = effective_batch_size * max_seq_len
@@ -82,10 +90,25 @@ def main():
     )
     
     checkpoint = None
+    samples_seen = 0
     if args.resume:
         checkpoint = trainer.load_checkpoint(args.resume, dataloader)
+        samples_seen = checkpoint.get("samples_seen", 0)
         if rank == 0:
-            print(f"Resumed from {args.resume} at step {trainer.step}")
+            print(f"Resumed from {args.resume} at step {trainer.step} (offset {samples_seen:,} samples)")
+        
+        # re-create dataloader with correct offset if needed
+        if samples_seen > 0:
+            dataloader = get_dataloader(
+                seq_len=max_seq_len, 
+                batch_size=batch_size, 
+                token_budget=max_token_budget,
+                data_config=data_config,
+                rank=rank, 
+                world_size=world_size,
+                samples_seen=samples_seen,
+                seed=seed,
+            )
     
     # WSD stage specific configuration
     if wsd_stage == "full":
@@ -137,6 +160,15 @@ def run_decay_stage(trainer, dataloader, checkpoint, args, tokens_per_step, base
         decay_start = trainer.step
     else:
         decay_start = trainer.decay_start_step or trainer.step
+        
+        # validate consistency for mid-decay resume
+        if trainer.decay_steps != decay_steps:
+            raise ValueError(
+                f"Resuming mid-decay run with different decay length!\n"
+                f"Checkpoint decay_steps: {trainer.decay_steps}\n"
+                f"Current --decay-tokens implies: {decay_steps}\n"
+                "You must use the same --decay-tokens value as the run you are resuming."
+            )
     
     max_steps = decay_start + decay_steps
     
@@ -155,7 +187,7 @@ def run_decay_stage(trainer, dataloader, checkpoint, args, tokens_per_step, base
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-size", type=str, default="xs", choices=["xs", "s", "m", "l", "xl"])
+    parser.add_argument("--model-size", type=str, default="tiny", choices=["tiny", "small", "medium", "large"])
     parser.add_argument("--pe-type", type=str, default="sinusoidal", choices=["none", "sinusoidal", "binary", "binary_norm", "decimal", "decimal_norm"])
     parser.add_argument("--grad-accum-steps", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size from config")
@@ -170,9 +202,9 @@ def parse_args():
 
 
 def load_configs(model_size):
-    with open("configs/model_sizes.yaml") as f:
+    with open("configs/config.yaml") as f:
         all_configs = yaml.safe_load(f)
-    return all_configs[model_size], all_configs["training"], all_configs.get("evaluation", {})
+    return all_configs[model_size], all_configs["training"], all_configs.get("evaluation", {}), all_configs.get("data", {})
 
 
 def create_model_and_optimizer(config, training_config, args):

@@ -46,7 +46,7 @@ pos-enc-bench/
 ├── README.md
 ├── requirements.txt
 ├── configs/                    # training configurations
-│   ├── model_sizes.yaml        # 1M, 5M, 25M, 100M, 500M configs
+│   ├── config.yaml             # 1M, 5M, 25M, 100M, 500M configs
 │   └── pe_variants.yaml        # PE-specific settings
 ├── src/
 │   ├── encodings/              # PE implementations
