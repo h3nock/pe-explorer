@@ -1,6 +1,8 @@
 import os
+import random
 from pathlib import Path
 import torch 
+import pandas as pd
 from torch.utils.data import IterableDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 import tiktoken 
@@ -65,6 +67,80 @@ class FineWebEduDataset(IterableDataset):
                 x = torch.tensor(chunk[:-1], dtype=torch.long)  # input 
                 y = torch.tensor(chunk[1:], dtype=torch.long)  # target (shifted by 1)
                 yield x, y
+
+
+class AlgorithmicDataset(IterableDataset):
+    """Infinite stream of algorithmic examples from Parquet file."""
+    
+    def __init__(self, path: str, seq_len: int, col_name: str = "text", rank: int = 0, seed: int = 42):
+        self.path = Path(path)
+        self.seq_len = seq_len
+        self.col_name = col_name
+        self.rank = rank
+        self.seed = seed
+        self.tokenizer = tiktoken.get_encoding("gpt2")
+        
+        if not self.path.exists():
+            raise FileNotFoundError(f"Algorithmic data not found: {self.path}")
+        
+        if rank == 0:
+            print(f"Loading algorithmic data from {self.path}...")
+        
+        self.df = pd.read_parquet(self.path)
+        self.texts = self.df[col_name].tolist()
+        
+        if rank == 0:
+            print(f"Loaded {len(self.texts):,} algorithmic examples")
+    
+    def __iter__(self):
+        # combine training seed + rank + worker id for variety across DDP and workers
+        worker_info = torch.utils.data.get_worker_info()
+        worker_id = worker_info.id if worker_info else 0
+        worker_seed = self.seed + self.rank * 1000 + worker_id
+        rng = random.Random(worker_seed)
+        
+        while True:  # infinite loop
+            text = rng.choice(self.texts)
+            tokens = self.tokenizer.encode(text)
+            
+            # pad short sequences by repeating
+            needed = self.seq_len + 1
+            while len(tokens) < needed:
+                tokens = tokens + tokens
+            
+            chunk = tokens[:needed]
+            x = torch.tensor(chunk[:-1], dtype=torch.long)
+            y = torch.tensor(chunk[1:], dtype=torch.long)
+            yield x, y
+
+
+class MixedIterableDataset(IterableDataset):
+    """Interleaves multiple IterableDatasets based on sampling weights."""
+    
+    def __init__(self, datasets: list, weights: list, seed: int = 42, rank: int = 0):
+        self.datasets = datasets
+        self.weights = weights
+        self.seed = seed
+        self.rank = rank
+    
+    def __iter__(self):
+        # combine training seed + rank + worker id for variety across DDP and workers
+        worker_info = torch.utils.data.get_worker_info()
+        worker_id = worker_info.id if worker_info else 0
+        worker_seed = self.seed + self.rank * 1000 + worker_id
+        rng = random.Random(worker_seed)
+        
+        iterators = [iter(d) for d in self.datasets]
+        
+        while True:
+            # sample which dataset to pull from
+            idx = rng.choices(range(len(iterators)), weights=self.weights, k=1)[0]
+            try:
+                yield next(iterators[idx])
+            except StopIteration:
+                # restart exhausted iterator (algorithmic is infinite, fineweb might end)
+                iterators[idx] = iter(self.datasets[idx])
+                yield next(iterators[idx])
     
 def get_dataloader(
     seq_len: int, 
@@ -73,10 +149,13 @@ def get_dataloader(
     num_workers: int = 4,
     rank: int = 0,
     world_size: int = 1,
+    data_config: dict = None,
+    seed: int = 42,
 ) -> StatefulDataLoader:
-    """Create a StatefulDataLoader for FineWeb-Edu.
+    """Create a StatefulDataLoader for training.
     
-    StatefulDataLoader supports state_dict()/load_state_dict() for checkpoint resumption.
+    If data_config contains mix_ratio, creates a mixed dataset of FineWeb-Edu
+    and Algorithmic data. Otherwise, uses FineWeb-Edu only.
     
     Args:
         seq_len: Sequence length for training
@@ -85,8 +164,41 @@ def get_dataloader(
         num_workers: Number of data loading workers
         rank: Distributed rank
         world_size: Distributed world size
+        data_config: Optional data configuration with mix_ratio and algorithmic paths
     """ 
-    dataset = FineWebEduDataset(seq_len=seq_len, variant=variant, rank=rank, world_size=world_size) 
+    fineweb = FineWebEduDataset(seq_len=seq_len, variant=variant, rank=rank, world_size=world_size)
+    
+    # check if mixing is enabled
+    if data_config and "mix_ratio" in data_config and "algorithmic" in data_config:
+        algo_cfg = data_config["algorithmic"]
+        algo_path = algo_cfg.get("train_path", "data/algorithmic/train.parquet")
+        
+        # only create mixed dataset if algorithmic data exists
+        if Path(algo_path).exists():
+            algo = AlgorithmicDataset(
+                path=algo_path,
+                seq_len=seq_len,
+                col_name=algo_cfg.get("col_name", "text"),
+                rank=rank,
+                seed=seed,
+            )
+            
+            weights = [
+                data_config["mix_ratio"].get("fineweb", 0.9),
+                data_config["mix_ratio"].get("algorithmic", 0.1),
+            ]
+            
+            if rank == 0:
+                print(f"Mixed dataset: {weights[0]:.0%} FineWeb + {weights[1]:.0%} Algorithmic")
+            
+            dataset = MixedIterableDataset([fineweb, algo], weights, seed=seed, rank=rank)
+        else:
+            if rank == 0:
+                print(f"Warning: Algorithmic data not found at {algo_path}, using FineWeb only")
+            dataset = fineweb
+    else:
+        dataset = fineweb
+    
     return StatefulDataLoader(
         dataset, 
         batch_size=batch_size, 

@@ -29,7 +29,7 @@ if mp.get_start_method(allow_none=True) != "spawn":
 def main():
     args = parse_args()
     rank, local_rank, world_size = setup_distributed()
-    config, training_config, eval_config = load_configs(args.model_size)
+    config, training_config, eval_config, data_config = load_configs(args.model_size)
     
     wsd_stage = args.wsd_stage or training_config.get("wsd_stage", "full")
     
@@ -52,7 +52,14 @@ def main():
         torch.cuda.manual_seed_all(seed)
     
     model, optimizer = create_model_and_optimizer(config, training_config, args)
-    dataloader = get_dataloader(seq_len=max_seq_len, batch_size=batch_size, rank=rank, world_size=world_size)
+    dataloader = get_dataloader(
+        seq_len=max_seq_len, 
+        batch_size=batch_size, 
+        rank=rank, 
+        world_size=world_size,
+        data_config=data_config,
+        seed=seed,
+    )
     
     effective_batch_size = batch_size * world_size * args.grad_accum_steps
     tokens_per_step = effective_batch_size * max_seq_len
@@ -172,7 +179,7 @@ def parse_args():
 def load_configs(model_size):
     with open("configs/config.yaml") as f:
         all_configs = yaml.safe_load(f)
-    return all_configs[model_size], all_configs["training"], all_configs.get("evaluation", {})
+    return all_configs[model_size], all_configs["training"], all_configs.get("evaluation", {}), all_configs.get("data", {})
 
 
 def create_model_and_optimizer(config, training_config, args):
