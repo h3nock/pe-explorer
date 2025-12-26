@@ -73,6 +73,14 @@ evaluation:
   checkpoint_interval: 5000
 
 data:
+  # fineWeb-Edu source (karpathy's pre-shuffled version)
+  fineweb:
+    repo: "karpathy/fineweb-edu-100b-shuffle"
+    total_shards: 1822           # total available (100B tokens)
+    download_shards: 911         # our default download (50B tokens, ~89GB)
+    tokens_per_shard: 55_000_000 # ~55M tokens per shard
+  
+  # mixed training 
   mix_ratio:
     fineweb: 0.9
     algorithmic: 0.1
