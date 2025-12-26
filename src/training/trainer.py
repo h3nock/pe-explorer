@@ -57,8 +57,11 @@ class Trainer:
         # training state (will be restored from checkpoint or defaults)
         self.step = 0
         self.micro_step = 0
+        self.step = 0
+        self.micro_step = 0
         self.consumed_tokens = 0
         self.run_id = None  # single run ID for wandb
+        self.samples_seen = 0 # Global samples seen (for deterministic resume)
         self.target_budget = None  # set from branch checkpoint for decay
         self.branch_tokens = None  # branch point for decay
         self.next_target_idx = 0
@@ -226,7 +229,7 @@ class Trainer:
             'model_state_dict': self.model.module.state_dict() if hasattr(self.model, 'module') else self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             
-            # Training geometry (for validation on resume)
+            # training geometry (for validation on resume)
             'batch_size': self.batch_size,
             'max_seq_len': self.max_seq_len,
             'grad_accum_steps': self.grad_accum_steps,
@@ -241,25 +244,18 @@ class Trainer:
             'target_checkpoints': self.target_checkpoints,
             'branch_tokens': self.branch_tokens,
             
-            # Progress tracking
+            # progress tracking
             'next_target_idx': self.next_target_idx,
             'wandb_run_id': self.run_id,
             
-            # RNG states for reproducibility
-            'rng_state': {
-                'python': random.getstate(),
-                'numpy': np.random.get_state(),
-                'torch': torch.get_rng_state(),
-                'cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-            },
+            # resume state (deterministic offset)
+            'samples_seen': self.samples_seen,
         }
         
         if self.scaler is not None:
             checkpoint['scaler_state_dict'] = self.scaler.state_dict()
         
-        # save dataloader state if provided (StatefulDataLoader)
-        if dataloader is not None and hasattr(dataloader, 'state_dict'):
-            checkpoint['dataloader_state'] = dataloader.state_dict()
+
 
         if extra:
             checkpoint.update(extra)
@@ -278,12 +274,12 @@ class Trainer:
             self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         
-        # Restore training state
+        # restore training state
         self.step = checkpoint['step']
         self.micro_step = checkpoint.get('micro_step', self.step * self.grad_accum_steps)
         self.consumed_tokens = checkpoint.get('consumed_tokens', 0)
         
-        # Validate training geometry hasn't changed (would break token math)
+        # validate training geometry hasn't changed (would break token math)
         if 'batch_size' in checkpoint:
             ckpt_tokens_per_step = (checkpoint['batch_size'] * checkpoint['max_seq_len'] * 
                                     checkpoint['grad_accum_steps'] * checkpoint['world_size'])
@@ -294,7 +290,7 @@ class Trainer:
                     "This would break LR schedule and token accounting."
                 )
         
-        # Restore WSD state (may be overwritten by configure_wsd for decay_only)
+        # restore WSD state (this might be overwritten by configure_wsd for decay_only phase)
         self.max_steps = checkpoint.get('max_steps', 0)
         self.decay_steps = checkpoint.get('decay_steps', 0)
         self.decay_start_step = checkpoint.get('decay_start_step')
@@ -302,30 +298,20 @@ class Trainer:
         self.target_checkpoints = checkpoint.get('target_checkpoints', [])
         self.branch_tokens = checkpoint.get('branch_tokens')
         
-        # Restore progress tracking
+        # restore progress tracking
         self.next_target_idx = checkpoint.get('next_target_idx', 0)
         self.run_id = checkpoint.get('wandb_run_id')
         
         # for fresh decay, CLEAR run_id so we create a NEW wandb run (not resume full run)
         if checkpoint.get('checkpoint_type') == 'pre_decay':
             self.run_id = None
+            
+        self.samples_seen = checkpoint.get('samples_seen', 0)
         
         if self.scaler is not None and 'scaler_state_dict' in checkpoint:
             self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
         
-        # Restore RNG states for reproducibility
-        if 'rng_state' in checkpoint:
-            rng = checkpoint['rng_state']
-            random.setstate(rng['python'])
-            np.random.set_state(rng['numpy'])
-            torch.set_rng_state(rng['torch'])
-            if rng['cuda'] is not None and torch.cuda.is_available():
-                torch.cuda.set_rng_state_all(rng['cuda'])
-        
-        # Restore dataloader state if provided
-        if dataloader is not None and 'dataloader_state' in checkpoint:
-            if hasattr(dataloader, 'load_state_dict'):
-                dataloader.load_state_dict(checkpoint['dataloader_state'])
+
 
         return checkpoint
     
@@ -415,6 +401,10 @@ class Trainer:
             current_tokens = x.numel() * self.world_size
             tokens_since_log += current_tokens
             self.consumed_tokens += current_tokens
+            
+            # count samples (global batch size)
+            # x.shape[0] is local batch size
+            self.samples_seen += x.shape[0] * self.world_size
             
             if did_step:
                 # this was an optimizer step

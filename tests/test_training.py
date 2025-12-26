@@ -2,7 +2,7 @@
 import torch
 from src.model.config import ModelConfig
 from src.model.transformer import Transformer
-from src.data.dataset import FineWebEduDataset, get_dataloader
+from src.data.dataset import MemmapDataset, get_dataloader
 from src.training.trainer import Trainer, setup_distributed, cleanup_distributed
 
 

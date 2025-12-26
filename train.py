@@ -29,7 +29,7 @@ if mp.get_start_method(allow_none=True) != "spawn":
 def main():
     args = parse_args()
     rank, local_rank, world_size = setup_distributed()
-    config, training_config, eval_config, data_config = load_configs(args.model_size)
+    config, training_config, eval_config, _ = load_configs(args.model_size)
     
     wsd_stage = args.wsd_stage or training_config.get("wsd_stage", "full")
     
@@ -55,9 +55,9 @@ def main():
     dataloader = get_dataloader(
         seq_len=max_seq_len, 
         batch_size=batch_size, 
+        token_budget=max_token_budget,
         rank=rank, 
         world_size=world_size,
-        data_config=data_config,
         seed=seed,
     )
     
@@ -89,10 +89,24 @@ def main():
     )
     
     checkpoint = None
+    samples_seen = 0
     if args.resume:
         checkpoint = trainer.load_checkpoint(args.resume, dataloader)
+        samples_seen = checkpoint.get("samples_seen", 0)
         if rank == 0:
-            print(f"Resumed from {args.resume} at step {trainer.step}")
+            print(f"Resumed from {args.resume} at step {trainer.step} (offset {samples_seen:,} samples)")
+        
+        # re-create dataloader with correct offset if needed
+        if samples_seen > 0:
+            dataloader = get_dataloader(
+                seq_len=max_seq_len, 
+                batch_size=batch_size, 
+                token_budget=max_token_budget,
+                rank=rank, 
+                world_size=world_size,
+                samples_seen=samples_seen,
+                seed=seed,
+            )
     
     # WSD stage specific configuration
     if wsd_stage == "full":

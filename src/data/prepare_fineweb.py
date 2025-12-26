@@ -1,12 +1,11 @@
-#!/usr/bin/env python3
 """Download and tokenize FineWeb-Edu for training.
 
 Usage:
-    python scripts/prepare_data.py download                   # Download shards
-    python scripts/prepare_data.py download --max-shards 100  # Download subset
-    python scripts/prepare_data.py tokenize                   # Tokenize to binary
-    python scripts/prepare_data.py tokenize --workers 16      # Parallel tokenization
-    python scripts/prepare_data.py info                       # Show status
+    python -m src.data.prepare_fineweb download                   # Download shards
+    python -m src.data.prepare_fineweb download --max-shards 100  # Download subset
+    python -m src.data.prepare_fineweb tokenize                   # Tokenize to binary
+    python -m src.data.prepare_fineweb tokenize --workers 16      # Parallel tokenization
+    python -m src.data.prepare_fineweb info                       # Show status
 """
 import argparse
 import json
@@ -21,8 +20,10 @@ import yaml
 from huggingface_hub import hf_hub_download, list_repo_files
 from tqdm import tqdm
 
+from src.data.tokenization import ShardWriter, Tokenizer
+
 # Config
-CONFIG_PATH = Path(__file__).parent.parent / "configs" / "config.yaml"
+CONFIG_PATH = Path(__file__).parent.parent.parent / "configs" / "config.yaml"
 CACHE_DIR = Path.home() / ".cache" / "fineweb-edu"
 TOKENIZER_NAME = "gpt2"
 SHARD_SIZE = 100_000_000  # 100M tokens per output shard (~200MB)
@@ -79,53 +80,22 @@ def tokenize_worker(args: tuple) -> dict:
     """Worker function: tokenize input shards with streaming writes."""
     worker_id, input_shards, output_dir = args
     
-    # initialize inside worker for process safety
-    tokenizer = tiktoken.get_encoding(TOKENIZER_NAME)
-    eot = tokenizer.eot_token
-    dtype = np.uint16 if tokenizer.n_vocab <= (np.iinfo(np.uint16).max + 1) else np.uint32
+    # helper handles tiktoken init and optimized encoding
+    tokenizer = Tokenizer(TOKENIZER_NAME)
     
-    buffer = np.zeros(BUFFER_SIZE, dtype=dtype)
+    buffer = np.zeros(BUFFER_SIZE, dtype=tokenizer.dtype)
     buf_idx = 0
-    shard_idx = 0
-    shard_tokens = 0  # tokens written to current output shard
     total_tokens = 0
     total_docs = 0
-    shard_paths = []
-    current_file = None
     
-    def open_new_shard():
-        nonlocal current_file, shard_idx, shard_tokens
-        if current_file:
-            current_file.close()
-        path = output_dir / f"train_w{worker_id:02d}_{shard_idx:04d}.bin"
-        shard_paths.append(str(path))
-        current_file = open(path, "wb")
-        shard_idx += 1
-        shard_tokens = 0
-    
-    def write_to_shards(arr: np.ndarray):
-        """Write token array to shard(s), splitting at shard boundaries."""
-        nonlocal current_file, shard_tokens
-        pos = 0
-        while pos < len(arr):
-            if current_file is None:
-                open_new_shard()
-            space_left = SHARD_SIZE - shard_tokens
-            to_write = min(len(arr) - pos, space_left)
-            arr[pos:pos + to_write].tofile(current_file)
-            shard_tokens += to_write
-            pos += to_write
-            # if shard is full, close it (next write opens a new one)
-            if shard_tokens >= SHARD_SIZE:
-                current_file.close()
-                current_file = None
+    writer = ShardWriter(output_dir, f"train_w{worker_id:02d}", SHARD_SIZE)
     
     def flush_buffer():
         """Write buffer to shard(s) and reset buffer index."""
         nonlocal buf_idx
         if buf_idx == 0:
             return
-        write_to_shards(buffer[:buf_idx])
+        writer.write(buffer[:buf_idx])
         buf_idx = 0
     
     for shard_path in input_shards:
@@ -134,20 +104,18 @@ def tokenize_worker(args: tuple) -> dict:
         for batch in parquet_file.iter_batches(batch_size=1000, columns=["text"]):
             for item in batch["text"]:  # iterate pyarrow array directly
                 text = item.as_py()     # convert one at a time
-                tokens = tokenizer.encode(text)
-                tokens.append(eot)
-                doc_len = len(tokens)
-                arr = np.asarray(tokens, dtype=dtype)
                 
-                # check if doc would cross shard boundary - start new shard at doc boundary
-                if shard_tokens + buf_idx + doc_len > SHARD_SIZE and (shard_tokens + buf_idx) > 0:
-                    flush_buffer()
-                    open_new_shard()
+                # Optimized encoding directly to numpy with EOT
+                arr = tokenizer.encode(text)
+                if arr is None: 
+                    continue
+                    
+                doc_len = len(arr)
                 
                 # handle oversized docs (larger than buffer)
                 if doc_len > BUFFER_SIZE:
                     flush_buffer()  # write any pending data first
-                    write_to_shards(arr)
+                    writer.write(arr)
                 else:
                     # flush buffer if doc won't fit
                     if buf_idx + doc_len > BUFFER_SIZE:
@@ -160,14 +128,13 @@ def tokenize_worker(args: tuple) -> dict:
                 total_docs += 1
     
     flush_buffer()
-    if current_file:
-        current_file.close()
+    writer.close()
     
     return {
         "worker_id": worker_id,
         "total_tokens": total_tokens,
         "total_docs": total_docs,
-        "shard_paths": shard_paths,
+        "shard_paths": writer.shard_paths,
     }
 
 
@@ -215,7 +182,8 @@ def tokenize(num_workers: int = 8) -> None:
         "shard_size": SHARD_SIZE,
         "dtype": dtype_str,
         "vocab_size": VOCAB_SIZE,
-        "shards": sorted(all_shards),
+        # Store relative paths (filenames) for portability
+        "shards": sorted([Path(p).name for p in all_shards]),
     }
     with open(output_dir / "meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
