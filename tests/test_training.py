@@ -27,10 +27,11 @@ def test_trainer_init():
         rank=0,
         local_rank=0,
         world_size=1,
+        batch_size=4,
+        max_seq_len=32,
         grad_accum_steps=1,
         grad_clip=1.0,
         warmup_steps=10,
-        max_steps=100,
         checkpoint_interval=50,
         checkpoint_dir="test_checkpoints",
     )
@@ -61,6 +62,8 @@ def test_trainer_step():
         rank=0,
         local_rank=0,
         world_size=1,
+        batch_size=4,
+        max_seq_len=32,
         checkpoint_interval=100,
         checkpoint_dir="test_checkpoints",
     )
@@ -69,7 +72,7 @@ def test_trainer_step():
     x = torch.randint(0, 1000, (4, 32))  # batch=4, seq=32
     y = torch.randint(0, 1000, (4, 32))
     
-    loss, grad_norm, weight_norm = trainer.train_step(x, y)
+    loss, grad_norm, weight_norm, did_step = trainer.train_step(x, y)
     
     assert isinstance(loss, float)
     assert isinstance(grad_norm, float)
@@ -88,6 +91,7 @@ def test_grad_accumulation():
         model=model,
         optimizer=optimizer,
         rank=0, local_rank=0, world_size=1,
+        batch_size=4, max_seq_len=32,
         grad_accum_steps=GRAD_ACCUM,
         checkpoint_interval=100,
         checkpoint_dir="test_checkpoints",
@@ -98,12 +102,12 @@ def test_grad_accumulation():
     
     # step 1-3: this should NOT increment step
     for i in range(GRAD_ACCUM - 1):
-        loss, _, _ = trainer.train_step(x, y)
+        loss, _, _, _ = trainer.train_step(x, y)
         assert trainer.step == 0
         assert trainer.micro_step == i + 1
         
     # step 4: should increment step
-    loss, _, _ = trainer.train_step(x, y)
+    loss, _, _, _ = trainer.train_step(x, y)
     assert trainer.step == 1
     assert trainer.micro_step == GRAD_ACCUM
     print(f"Gradient accumulation test passed (steps: {GRAD_ACCUM})")
@@ -119,11 +123,12 @@ def test_lr_schedule():
         model=model,
         optimizer=optimizer,
         rank=0, local_rank=0, world_size=1,
+        batch_size=4, max_seq_len=32,
         warmup_steps=10,
-        max_steps=100,
         checkpoint_interval=50,
         checkpoint_dir="test_checkpoints",
     )
+    trainer.configure_wsd("full", max_steps=100, decay_steps=10)
     
     # warmup: LR should increase
     lr_0 = trainer.get_lr(0)
@@ -134,13 +139,15 @@ def test_lr_schedule():
     assert lr_5 > lr_0  # Increasing during warmup
     assert lr_10 == 1e-3  # Full LR at end of warmup
     
-    # cosine decay: LR should decrease
-    lr_50 = trainer.get_lr(50)
-    lr_100 = trainer.get_lr(100)
+    # decay phase (starts at step 90)
+    lr_50 = trainer.get_lr(50)  # Stable phase
+    lr_95 = trainer.get_lr(95)  # Decay phase
+    lr_100 = trainer.get_lr(100)  # End of decay
     
-    assert lr_50 < lr_10  # Decaying
-    assert lr_100 < lr_50  # Still decaying
-    print(f"LR schedule: 0={lr_0:.6f}, 5={lr_5:.6f}, 10={lr_10:.6f}, 50={lr_50:.6f}, 100={lr_100:.6f}")
+    assert lr_50 == 1e-3  # Stable phase = full LR
+    assert lr_95 < lr_50  # Decaying
+    assert lr_100 == 0.0  # End of decay
+    print(f"LR schedule: 0={lr_0:.6f}, 5={lr_5:.6f}, 10={lr_10:.6f}, 50={lr_50:.6f}, 95={lr_95:.6f}, 100={lr_100:.6f}")
 
 
 if __name__ == "__main__":
@@ -148,5 +155,4 @@ if __name__ == "__main__":
     test_trainer_step()
     test_lr_schedule()
     test_grad_accumulation()
-    test_token_tracking()
     print("\nAll training tests passed!")
