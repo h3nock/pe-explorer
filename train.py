@@ -11,6 +11,8 @@ import random
 import yaml
 import numpy as np
 import torch
+import torch.multiprocessing as mp
+
 from torch.optim.adamw import AdamW
 
 from src.model.config import ModelConfig
@@ -21,6 +23,8 @@ from src.training.trainer import Trainer, setup_distributed, cleanup_distributed
 from dotenv import load_dotenv 
 load_dotenv()
 
+if mp.get_start_method(allow_none=True) != "spawn":
+    mp.set_start_method("spawn", force=True)
 
 def main():
     args = parse_args()
