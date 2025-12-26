@@ -158,6 +158,15 @@ def run_decay_stage(trainer, dataloader, checkpoint, args, tokens_per_step, base
         decay_start = trainer.step
     else:
         decay_start = trainer.decay_start_step or trainer.step
+        
+        # validate consistency for mid-decay resume
+        if trainer.decay_steps != decay_steps:
+            raise ValueError(
+                f"Resuming mid-decay run with different decay length!\n"
+                f"Checkpoint decay_steps: {trainer.decay_steps}\n"
+                f"Current --decay-tokens implies: {decay_steps}\n"
+                "You must use the same --decay-tokens value as the run you are resuming."
+            )
     
     max_steps = decay_start + decay_steps
     
