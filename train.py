@@ -155,7 +155,7 @@ def run_decay_stage(trainer, dataloader, checkpoint, args, tokens_per_step, base
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-size", type=str, default="xs", choices=["xs", "s", "m", "l", "xl"])
+    parser.add_argument("--model-size", type=str, default="tiny", choices=["tiny", "small", "medium", "large"])
     parser.add_argument("--pe-type", type=str, default="sinusoidal", choices=["none", "sinusoidal", "binary", "binary_norm", "decimal", "decimal_norm"])
     parser.add_argument("--grad-accum-steps", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size from config")

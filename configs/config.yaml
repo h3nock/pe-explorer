@@ -1,67 +1,55 @@
-# Configurations
+# Model and Training Configurations
 #
-# Design choices:
-#   - d_head = 64 for all sizes (based on the trend that 64 is used for <1B models and 128 for larger models)
-#   - d_ff = 4 × d_model (original transformer ratio even tho some models use 3x or 3.5x)
+# Design principles:
+#   - d_head = 64 for all sizes (2024 best practice for <1B models)
+#   - d_ff = 4 × d_model (standard transformer ratio)
 #   - n_layers derived from: params ≈ 12 × n_layers × d_model²
-#   - optimal_tokens = 20 × params (Chinchilla scaling) for budget A run 
-#   - learning rate scales down with model size for stability 
-# Most of the choices come from GPT-2, GPT-3, and Chinchilla papers. 
+#   - Chinchilla-optimal: 20 tokens per parameter (Budget A), 40N (Budget B)
+#   - Based on Pythia, SmolLM, MobileLLM papers
 
-xs:
-  d_model: 128
-  n_layers: 5
-  n_heads: 2       # 128 / 64 = 2
-  d_ff: 512        # 4 × 128
-  max_seq_len: 512
-  max_token_budget: 100_000_000
+tiny:
+  d_model: 512
+  n_layers: 6
+  n_heads: 8         # 512 / 64 = 8
+  d_ff: 2048         # 4 × 512
+  max_seq_len: 1024
+  max_token_budget: 2_800_000_000
   batch_size: 64
   learning_rate: 6.0e-4
-  target_budgets: [20_000_000, 100_000_000] # Budget A (20M), Budget B (100M)
+  target_budgets: [1_400_000_000, 2_800_000_000]  # 20N (~70M), 40N
 
-s:
-  d_model: 256
-  n_layers: 6
-  n_heads: 4       # 256 / 64 = 4
-  d_ff: 1024
-  max_seq_len: 512
-  max_token_budget: 500_000_000
-  batch_size: 64
-  learning_rate: 5.0e-4
-  target_budgets: [100_000_000, 500_000_000] # Budget A (100M), Budget B (500M)
-
-m:
-  d_model: 512
-  n_layers: 8
-  n_heads: 8       # 512 / 64 = 8
-  d_ff: 2048
+small:
+  d_model: 768
+  n_layers: 12
+  n_heads: 12        # 768 / 64 = 12
+  d_ff: 3072         # 4 × 768
   max_seq_len: 1024
-  max_token_budget: 2_500_000_000
+  max_token_budget: 6_400_000_000
   batch_size: 32
   learning_rate: 3.0e-4
-  target_budgets: [500_000_000, 2_500_000_000] # Budget A (500M), Budget B (2.5B)
+  target_budgets: [3_200_000_000, 6_400_000_000]  # 20N (~160M), 40N
 
-l:
-  d_model: 768
-  n_layers: 14
-  n_heads: 12      # 768 / 64 = 12
-  d_ff: 3072
-  max_seq_len: 1024
-  max_token_budget: 4_000_000_000 
-  batch_size: 32
-  learning_rate: 2.0e-4
-  target_budgets: [2_000_000_000, 4_000_000_000] # Budget A (2B), Budget B (4B)
-
-xl:
+medium:
   d_model: 1024
-  n_layers: 40
-  n_heads: 16      # 1024 / 64 = 16
-  d_ff: 4096
+  n_layers: 24
+  n_heads: 16        # 1024 / 64 = 16
+  d_ff: 4096         # 4 × 1024
   max_seq_len: 2048
-  max_token_budget: 20_000_000_000
+  max_token_budget: 16_400_000_000
   batch_size: 16
+  learning_rate: 2.0e-4
+  target_budgets: [8_200_000_000, 16_400_000_000]  # 20N (~410M), 40N
+
+large:
+  d_model: 2048
+  n_layers: 16
+  n_heads: 32        # 2048 / 64 = 32
+  d_ff: 8192         # 4 × 2048
+  max_seq_len: 2048
+  max_token_budget: 40_000_000_000
+  batch_size: 8
   learning_rate: 1.0e-4
-  target_budgets: [10_000_000_000, 20_000_000_000]
+  target_budgets: [20_000_000_000, 40_000_000_000]  # 20N (~1B), 40N
 
 
 # shared training settings
