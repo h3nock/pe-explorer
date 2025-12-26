@@ -79,6 +79,7 @@ data:
     total_shards: 1822           # total available (100B tokens)
     download_shards: 911         # our default download (50B tokens, ~89GB)
     tokens_per_shard: 55_000_000 # ~55M tokens per shard
+    tokenized_path: "~/.cache/fineweb-edu/tokenized"
   
   # mixed training 
   mix_ratio:
@@ -87,4 +88,5 @@ data:
   algorithmic:
     train_path: "data/algorithmic/train.parquet"
     eval_path: "data/algorithmic/eval.parquet"
+    tokenized_path: "data/algorithmic_bin"
     col_name: "text"

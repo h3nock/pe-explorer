@@ -29,7 +29,7 @@ if mp.get_start_method(allow_none=True) != "spawn":
 def main():
     args = parse_args()
     rank, local_rank, world_size = setup_distributed()
-    config, training_config, eval_config, _ = load_configs(args.model_size)
+    config, training_config, eval_config, data_config = load_configs(args.model_size)
     
     wsd_stage = args.wsd_stage or training_config.get("wsd_stage", "full")
     
@@ -56,6 +56,7 @@ def main():
         seq_len=max_seq_len, 
         batch_size=batch_size, 
         token_budget=max_token_budget,
+        data_config=data_config,
         rank=rank, 
         world_size=world_size,
         seed=seed,
@@ -102,6 +103,7 @@ def main():
                 seq_len=max_seq_len, 
                 batch_size=batch_size, 
                 token_budget=max_token_budget,
+                data_config=data_config,
                 rank=rank, 
                 world_size=world_size,
                 samples_seen=samples_seen,
