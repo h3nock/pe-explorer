@@ -1,7 +1,7 @@
 import os
 import time
-import math
 import random
+import pickle
 import torch
 import wandb
 import numpy as np
@@ -58,8 +58,9 @@ class Trainer:
         self.step = 0
         self.micro_step = 0
         self.consumed_tokens = 0
-        self.run_ids = {}
+        self.run_id = None  # single run ID for wandb
         self.target_budget = None  # set from branch checkpoint for decay
+        self.branch_tokens = None  # branch point for decay
         self.next_target_idx = 0
 
         # WSD state (set by configure_wsd after checkpoint load)
@@ -68,9 +69,8 @@ class Trainer:
         self.decay_steps = 0
         self.decay_start_step = None
         self.target_checkpoints = []
-        
-        # WandB manager (set after configure_wsd)
-        self.wandb_manager = None
+        self.resume_checkpoint_path = None  # path to checkpoint we resumed from
+        self.wandb_buffer = []  # metrics buffer, flushed to disk at checkpoints
 
         if torch.cuda.is_available():
             self.device = torch.device(f"cuda:{local_rank}")
@@ -120,30 +120,71 @@ class Trainer:
         if stage == "decay_only" and self.decay_start_step is None:
             self.decay_start_step = self.step
     
-    def init_wandb_full(self, target_checkpoints: list, base_config: dict, group: str):
-        """Initialize multi-budget wandb runs for full WSD stage."""
-        from src.training.wandb_manager import BudgetRunManager
-        self.wandb_manager = BudgetRunManager(
-            project="pos-enc-bench",
-            group=group,
-            base_config=base_config,
-            target_checkpoints=target_checkpoints,
-            run_ids=self.run_ids,
-        )
-        self.run_ids = self.wandb_manager.get_all_run_ids()
-    
-    def init_wandb_decay(self, base_config: dict, group: str):
-        """Resume wandb run for decay stage."""
-        if self.target_budget not in self.run_ids:
-            raise ValueError(f"No wandb run_id for budget {format_budget(self.target_budget)}")
-        wandb.init(project="pos-enc-bench", id=self.run_ids[self.target_budget], resume="must")
+    def init_wandb(self, base_config: dict, group: str, target_budget: int):
+        """Initialize wandb run. target_budget is the budget this run is named for."""
+        if self.rank != 0:
+            return
+        
+        budget_str = format_budget(target_budget)
+        run_name = f"{base_config.get('model_size', 'unknown')}_{base_config.get('pe_type', 'unknown')}_{budget_str}_s{base_config.get('seed', 42)}"
+        
+        if self.run_id:
+            # resuming existing run - rewind to checkpoint step to match local history
+            wandb.init(
+                project="pos-enc-bench",
+                resume_from=f"{self.run_id}?_step={self.consumed_tokens}"
+            )
+        else:
+            # new run
+            run = wandb.init(
+                project="pos-enc-bench",
+                group=group,
+                name=run_name,
+                config={**base_config, "target_budget": target_budget},
+            )
+            self.run_id = run.id
+            
+            # fresh decay: replay shared history up to branch point
+            if self.wsd_stage == "decay_only" and self.branch_tokens and self.resume_checkpoint_path:
+                history_dir = os.path.dirname(self.resume_checkpoint_path)
+                history_path = os.path.join(history_dir, "wandb_history.pkl")
+                if os.path.exists(history_path):
+                    with open(history_path, "rb") as f:
+                        while True:
+                            try:
+                                tokens, metrics = pickle.load(f)
+                                if tokens <= self.branch_tokens:
+                                    wandb.log({**metrics, "tokens": tokens}, step=tokens)
+                            except EOFError:
+                                break
 
     def finish_wandb(self):
-        """Finish all wandb runs."""
-        if self.wandb_manager:
-            self.wandb_manager.finish_all()
-        else:
+        """Finish wandb run."""
+        if self.rank == 0:
             wandb.finish()
+    
+    def log_wandb(self, metrics: dict, consumed_tokens: int):
+        """Log to wandb. For full stage, also buffers for later flush."""
+        if self.rank != 0:
+            return
+        wandb.log({**metrics, "tokens": consumed_tokens}, step=consumed_tokens)
+        # buffer for history (full stage only, flushed at checkpoints)
+        if self.wsd_stage == "full":
+            self.wandb_buffer.append((consumed_tokens, metrics))
+    
+    def flush_wandb_history(self):
+        """Append buffered history to disk and clear buffer."""
+        if self.rank != 0 or not self.wandb_buffer:
+            return
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+        history_path = os.path.join(self.checkpoint_dir, "wandb_history.pkl")
+        with open(history_path, "ab") as f:
+            for rec in self.wandb_buffer:
+                pickle.dump(rec, f, protocol=pickle.HIGHEST_PROTOCOL)
+            f.flush()
+            os.fsync(f.fileno())
+        self.wandb_buffer.clear()
+
     def get_lr(self, step: int) -> float:
         """Calculate learning rate based on WSD schedule."""
         if self.wsd_stage == "full":
@@ -198,10 +239,11 @@ class Trainer:
             'decay_start_step': self.decay_start_step,
             'target_budget': self.target_budget,
             'target_checkpoints': self.target_checkpoints,
+            'branch_tokens': self.branch_tokens,
             
             # Progress tracking
             'next_target_idx': self.next_target_idx,
-            'wandb_run_ids': self.run_ids,
+            'wandb_run_id': self.run_id,
             
             # RNG states for reproducibility
             'rng_state': {
@@ -226,6 +268,7 @@ class Trainer:
     
     def load_checkpoint(self, path: str, dataloader=None):
         """Load training checkpoint and restore all state for exact resumption."""
+        self.resume_checkpoint_path = path  # remember where we loaded from
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         
         # Restore model and optimizer
@@ -257,10 +300,15 @@ class Trainer:
         self.decay_start_step = checkpoint.get('decay_start_step')
         self.target_budget = checkpoint.get('target_budget')
         self.target_checkpoints = checkpoint.get('target_checkpoints', [])
+        self.branch_tokens = checkpoint.get('branch_tokens')
         
         # Restore progress tracking
         self.next_target_idx = checkpoint.get('next_target_idx', 0)
-        self.run_ids = checkpoint.get('wandb_run_ids', {})
+        self.run_id = checkpoint.get('wandb_run_id')
+        
+        # for fresh decay, CLEAR run_id so we create a NEW wandb run (not resume full run)
+        if checkpoint.get('checkpoint_type') == 'pre_decay':
+            self.run_id = None
         
         if self.scaler is not None and 'scaler_state_dict' in checkpoint:
             self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
@@ -392,10 +440,7 @@ class Trainer:
                             "train/grad_norm": grad_norm,
                             "param/weight_norm": weight_norm,
                         }
-                        if self.wandb_manager:
-                            self.wandb_manager.log(metrics, self.consumed_tokens)
-                        else:
-                            wandb.log(metrics, step=self.consumed_tokens)
+                        self.log_wandb(metrics, self.consumed_tokens)
                     
                     # reset accumulators
                     accum_loss = 0.0
@@ -407,6 +452,7 @@ class Trainer:
                 if self.step % self.checkpoint_interval == 0 and self.step > 0:
                     os.makedirs(self.checkpoint_dir, exist_ok=True)
                     self.save_checkpoint(f"{self.checkpoint_dir}/step_{self.step}.pt", dataloader)
+                    self.flush_wandb_history()
                 
                 # force save for targeted budgets (WSD branching points)
                 # use while to handle multiple targets being crossed in one step
@@ -433,3 +479,4 @@ class Trainer:
         # save final checkpoint
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         self.save_checkpoint(f"{self.checkpoint_dir}/final.pt", dataloader)
+        self.flush_wandb_history()

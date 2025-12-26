@@ -108,13 +108,9 @@ def run_full_stage(trainer, dataloader, config, training_config, tokens_per_step
     else:
         trainer.configure_wsd("full", trainer.max_steps, trainer.decay_steps or decay_steps, target_checkpoints)
     
-    if rank == 0:
-        trainer.init_wandb_full(target_checkpoints, base_config, group_name)
-    
+    trainer.init_wandb(base_config, group_name, max_token_budget)
     trainer.train(dataloader, log_interval=log_interval)
-    
-    if rank == 0:
-        trainer.finish_wandb()
+    trainer.finish_wandb()
 
 
 def run_decay_stage(trainer, dataloader, checkpoint, args, tokens_per_step, base_config, group_name, rank, log_interval):
@@ -123,6 +119,10 @@ def run_decay_stage(trainer, dataloader, checkpoint, args, tokens_per_step, base
         raise ValueError("decay_only requires --resume")
     if not args.decay_tokens:
         raise ValueError("decay_only requires --decay-tokens")
+    if not trainer.target_budget:
+        raise ValueError(
+            "decay_only requires a branch checkpoint (ready_for_decay_*.pt) with a target_budget set."
+        )
     
     decay_steps = args.decay_tokens // tokens_per_step
     
@@ -141,14 +141,12 @@ def run_decay_stage(trainer, dataloader, checkpoint, args, tokens_per_step, base
     
     trainer.configure_wsd("decay_only", max_steps, decay_steps)
     
+    trainer.init_wandb(base_config, group_name, trainer.target_budget)
     if rank == 0:
-        trainer.init_wandb_decay(base_config, group_name)
         print(f"WSD decay: {decay_steps} steps (from {trainer.step} to {max_steps})")
     
     trainer.train(dataloader, log_interval=log_interval)
-    
-    if rank == 0:
-        trainer.finish_wandb()
+    trainer.finish_wandb()
 
 
 def parse_args():
