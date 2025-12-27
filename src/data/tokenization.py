@@ -27,9 +27,10 @@ class Tokenizer:
         if not text:
             return None
             
-        tokens = self.enc.encode(text)
-        # Append EOT directly to list before numpy conversion (faster than np.append)
-        tokens.append(self.eot)
+        tokens = self.enc.encode(text, allowed_special={'<|endoftext|>'})
+        # only append EOT if not already present to avoid double-EOT
+        if not tokens or tokens[-1] != self.eot:
+            tokens.append(self.eot)
         return np.asarray(tokens, dtype=self.dtype)
 
 class ShardWriter:
