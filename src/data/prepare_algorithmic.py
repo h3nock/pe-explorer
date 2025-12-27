@@ -195,12 +195,17 @@ def tokenize_worker(args):
         "shard_paths": writer.shard_paths,
     }
 
+def tokenize_dataset(parquet_dir: Path | list[Path], output_dir: Path, num_workers: int = 8):
+    """Tokenize parquet files to binary shards."""
+    if isinstance(parquet_dir, list):
+        parquet_files = parquet_dir
+        input_desc = f"{len(parquet_files)} files"
+    else:
+        parquet_files = sorted(list(parquet_dir.glob("*.parquet")))
+        input_desc = f"{parquet_dir}"
 
-def tokenize_dataset(parquet_dir: Path, output_dir: Path, num_workers: int = 8):
-    """Tokenize all parquet files in directory to binary shards."""
-    parquet_files = sorted(list(parquet_dir.glob("*.parquet")))
     if not parquet_files:
-        print(f"No .parquet files found in {parquet_dir}")
+        print(f"No .parquet files found in {input_desc}")
         return
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -209,7 +214,7 @@ def tokenize_dataset(parquet_dir: Path, output_dir: Path, num_workers: int = 8):
     num_workers = min(num_workers, len(parquet_files))
     chunks = [parquet_files[i::num_workers] for i in range(num_workers)]
     
-    print(f"Tokenizing {len(parquet_files)} files with {num_workers} workers...")
+    print(f"Tokenizing {len(parquet_files)} files to {output_dir} with {num_workers} workers...")
     
     worker_args = [(i, chunks[i], output_dir) for i in range(num_workers)]
     results = []
@@ -271,11 +276,26 @@ def main():
 
     if args.command == "tokenize":
         input_dir = Path(args.input_dir or CACHE_DIR)
-        output_dir = Path(args.output_dir)
-        if not input_dir.exists():
-            print(f"Error: Input directory {input_dir} not found.")
-            return
-        tokenize_dataset(input_dir, output_dir, args.workers)
+        output_base = Path(args.output_dir)
+
+        train_file = input_dir / "train.parquet"
+        eval_file = input_dir / "eval.parquet"
+
+        if train_file.exists():
+            print(f"Tokenizing TRAIN data...")
+            tokenize_dataset([train_file], output_base / "train", args.workers)
+
+        if eval_file.exists():
+            print(f"Tokenizing EVAL data...")
+            tokenize_dataset([eval_file], output_base / "eval", args.workers)
+
+        if not train_file.exists() and not eval_file.exists():
+            print(f"Tokenizing ALL .parquet files in {input_dir}...")
+            if not input_dir.exists():
+                 print(f"Error: Input directory {input_dir} not found.")
+                 return
+            tokenize_dataset(input_dir, output_base, args.workers)
+
         return
 
     # Default to generate if no command or explicit generate
@@ -288,8 +308,6 @@ def main():
             parser.error("--num_workers must be >= 1")
         
         config = load_config(args.config)
-        gen_cfg = config["generation"]
-        
         gen_cfg = config["generation"]
         
         # override from CLI or use config defaults
