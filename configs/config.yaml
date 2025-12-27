@@ -88,5 +88,5 @@ data:
   algorithmic:
     train_path: "data/algorithmic/train.parquet"
     eval_path: "data/algorithmic/eval.parquet"
-    tokenized_path: "data/algorithmic_bin"
+    tokenized_path: "data/algorithmic_bin/train"
     col_name: "text"
