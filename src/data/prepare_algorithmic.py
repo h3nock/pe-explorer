@@ -24,7 +24,7 @@ from src.data.tokenization import ShardWriter, Tokenizer
 
 
 TOKENIZER_NAME = "gpt2"
-SHARD_SIZE = 100_000_000  # 100M tokens per shard, matching prepare_data.py
+SHARD_SIZE = 100_000_000  # 100M tokens per shard
 BUFFER_SIZE = 1_000_000
 CACHE_DIR = Path.home() / ".cache" / "algorithmic"
 
@@ -94,31 +94,44 @@ def _generate_one(task: str, length_range: list) -> dict:
     return {"text": GENERATORS[task](length), "task": task, "length": length}
 
 
-def generate_train_dataset(num_examples: int, config: dict, seed: int) -> list[dict]:
-    """Generate training dataset."""
+def generate_train_dataset(num_examples: int, config: dict, seed: int, chunk_size: int = 250_000):
+    """Generate training dataset in chunks."""
     set_seed(seed)
     tasks = list(config["tasks"].keys())
     weights = [config["tasks"][t]["weight"] for t in tasks]
-    data = []
     
-    for _ in tqdm(range(num_examples), desc="Generating"):
-        task = random.choices(tasks, weights=weights, k=1)[0]
-        data.append(_generate_one(task, config["tasks"][task]["train_range"]))
+    num_chunks = (num_examples + chunk_size - 1) // chunk_size
     
-    return data
+    for _ in tqdm(range(num_chunks), desc="Generating chunks"):
+        data = []
+        current_chunk_size = min(chunk_size, num_examples)
+        for _ in range(current_chunk_size):
+            task = random.choices(tasks, weights=weights, k=1)[0]
+            data.append(_generate_one(task, config["tasks"][task]["train_range"]))
+        
+        num_examples -= current_chunk_size
+        yield data
 
 
-def generate_train_dataset_parallel(num_examples: int, config: dict, seed: int, num_workers: int = 8) -> list[dict]:
-    num_workers = min(num_workers, num_examples)  # avoid empty chunks
-    chunk_size = num_examples // num_workers
-    chunks = [(i * chunk_size, (i + 1) * chunk_size if i < num_workers - 1 else num_examples, seed)
-              for i in range(num_workers)]
+def generate_train_dataset_parallel(num_examples: int, config: dict, seed: int, num_workers: int = 8, chunk_size: int = 250_000):
+    """Generate in parallel using fixed small shards to avoid OOM."""
+    num_chunks = (num_examples + chunk_size - 1) // chunk_size
     
-    print(f"Generating {num_examples:,} with {num_workers} workers...")
+    # create smaller tasks for workers
+    chunks = []
+    for i in range(num_chunks):
+        start = i * chunk_size
+        end = min((i + 1) * chunk_size, num_examples)
+        chunks.append((start, end, seed))
+    
+    print(f"Generating {num_examples:,} examples in {len(chunks)} chunks using {num_workers} workers...")
+    
+
     with Pool(num_workers, initializer=_init_worker, initargs=(config,)) as pool:
-        results = list(tqdm(pool.imap(_generate_chunk, chunks), total=len(chunks)))
+        for chunk in tqdm(pool.imap(_generate_chunk, chunks), total=len(chunks)):
+            yield chunk
     
-    return [example for chunk in results for example in chunk]
+
 
 
 def generate_eval_dataset(num_per_task: int, config: dict, seed: int) -> list[dict]:
@@ -144,7 +157,6 @@ def tokenize_worker(args):
     """Worker to tokenize a chunk of parquet file(s) into binary shards."""
     worker_id, input_files, output_dir = args
     
-    # helper handles tiktoken init and optimized encoding
     tokenizer = Tokenizer(TOKENIZER_NAME)
     
     buffer = np.zeros(BUFFER_SIZE, dtype=tokenizer.dtype)
@@ -167,7 +179,6 @@ def tokenize_worker(args):
             for item in batch["text"]:
                 text = item.as_py()
                 
-                # Optimized encoding directly to numpy with EOT
                 arr = tokenizer.encode(text)
                 if arr is None:
                     continue
@@ -265,6 +276,7 @@ def main():
     gen_parser.add_argument("--eval_per_task", type=int, default=None)
     gen_parser.add_argument("--parallel", action="store_true")
     gen_parser.add_argument("--num_workers", "--workers", type=int, default=8, dest="num_workers")
+    gen_parser.add_argument("--shard_size", type=int, default=250_000, help="Examples per parquet shard")
 
     # Tokenize command
     tok_parser = subparsers.add_parser("tokenize", help="Tokenize parquet to binary")
@@ -278,18 +290,22 @@ def main():
         input_dir = Path(args.input_dir or CACHE_DIR)
         output_base = Path(args.output_dir)
 
-        train_file = input_dir / "train.parquet"
+        # detect train files: either single train.parquet or sharded train_*.parquet
+        train_files = sorted(list(input_dir.glob("train_*.parquet")))
+        if (input_dir / "train.parquet").exists():
+            train_files.append(input_dir / "train.parquet")
+            
         eval_file = input_dir / "eval.parquet"
 
-        if train_file.exists():
-            print(f"Tokenizing TRAIN data...")
-            tokenize_dataset([train_file], output_base / "train", args.workers)
+        if train_files:
+            print(f"Tokenizing TRAIN data ({len(train_files)} files)...")
+            tokenize_dataset(train_files, output_base / "train", args.workers)
 
         if eval_file.exists():
             print(f"Tokenizing EVAL data...")
             tokenize_dataset([eval_file], output_base / "eval", args.workers)
 
-        if not train_file.exists() and not eval_file.exists():
+        if not train_files and not eval_file.exists():
             print(f"Tokenizing ALL .parquet files in {input_dir}...")
             if not input_dir.exists():
                  print(f"Error: Input directory {input_dir} not found.")
@@ -326,10 +342,19 @@ def main():
         # train
         print(f"\n{'='*50}\nTRAIN: {num_examples:,} examples\n{'='*50}")
         if args.parallel:
-            train_data = generate_train_dataset_parallel(num_examples, config, gen_cfg["train_seed"], args.num_workers)
+            # write sharded output (parallel)
+            print(f"Writing sharded train files to {output_dir} (shard_size={args.shard_size})...")
+            chunk_gen = generate_train_dataset_parallel(num_examples, config, gen_cfg["train_seed"], args.num_workers, chunk_size=args.shard_size)
+            for i, chunk in enumerate(chunk_gen):
+                fname = output_dir / f"train_{i:04d}.parquet"
+                pd.DataFrame(chunk).to_parquet(fname, index=False)
         else:
-            train_data = generate_train_dataset(num_examples, config, gen_cfg["train_seed"])
-        pd.DataFrame(train_data).to_parquet(output_dir / "train.parquet", index=False)
+            # write sharded output (sequential)
+            print(f"Writing sharded train files to {output_dir} (shard_size={args.shard_size})...")
+            chunk_gen = generate_train_dataset(num_examples, config, gen_cfg["train_seed"], chunk_size=args.shard_size)
+            for i, chunk in enumerate(chunk_gen):
+                fname = output_dir / f"train_{i:04d}.parquet"
+                pd.DataFrame(chunk).to_parquet(fname, index=False)
         
         # eval
         print(f"\n{'='*50}\nEVAL: {eval_per_task} per task\n{'='*50}")
