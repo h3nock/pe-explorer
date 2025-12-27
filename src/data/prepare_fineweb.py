@@ -45,6 +45,7 @@ def load_config() -> dict:
         "total_shards": cfg.get("total_shards", 1822),
         "download_shards": cfg.get("download_shards", 911),
         "tokens_per_shard": cfg.get("tokens_per_shard", 55_000_000),
+        "tokenized_path": cfg.get("tokenized_path", "data/fineweb_bin"),
     }
 
 
@@ -148,8 +149,11 @@ def tokenize(num_workers: int = 8) -> None:
     with open(manifest_path, encoding="utf-8") as f:
         input_shards = json.load(f)["shards"]
 
-    output_dir = CACHE_DIR / "tokenized"
-    output_dir.mkdir(exist_ok=True)
+    cfg = load_config()
+
+    # Output from config (expanduser to handle ~)
+    output_dir = Path(cfg["tokenized_path"]).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     # Split input shards across workers
     num_workers = min(num_workers, len(input_shards))
@@ -211,14 +215,18 @@ def info():
     else:
         print("Downloaded: 0 shards")
 
-    meta = CACHE_DIR / "tokenized" / "meta.json"
+    # Use config path for meta.json
+    output_dir = Path(cfg["tokenized_path"]).expanduser()
+    meta = output_dir / "meta.json"
+    
     if meta.exists():
         with open(meta, encoding="utf-8") as f:
             m = json.load(f)
         print(f"Tokenized: {m['total_tokens']:,} tokens across {m['num_shards']} shards")
+        print(f"  Path: {output_dir}")
         print(f"  Dtype: {m.get('dtype', 'uint16')} (vocab: {m.get('vocab_size', 'unknown')})")
     else:
-        print("Tokenized: not yet")
+        print(f"Tokenized: not yet (checked {output_dir})")
 
 
 def main():

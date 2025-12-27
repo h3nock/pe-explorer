@@ -13,7 +13,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 
 
-DEFAULT_TOKENIZED_DIR = Path.home() / ".cache" / "fineweb-edu" / "tokenized"
+DEFAULT_TOKENIZED_DIR = Path("data") / "fineweb_bin"
 
 class ShardDataset(Dataset):
     """Memory-mapped dataset for a single binary shard."""

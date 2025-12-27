@@ -26,6 +26,7 @@ from src.data.tokenization import ShardWriter, Tokenizer
 TOKENIZER_NAME = "gpt2"
 SHARD_SIZE = 100_000_000  # 100M tokens per shard, matching prepare_data.py
 BUFFER_SIZE = 1_000_000
+CACHE_DIR = Path.home() / ".cache" / "algorithmic"
 
 
 def load_config(config_path: str = "configs/data_generation.yaml") -> dict:
@@ -262,14 +263,19 @@ def main():
 
     # Tokenize command
     tok_parser = subparsers.add_parser("tokenize", help="Tokenize parquet to binary")
-    tok_parser.add_argument("--input_dir", type=str, required=True, help="Directory containing .parquet files")
-    tok_parser.add_argument("--output_dir", type=str, required=True, help="Output directory for .bin files")
+    tok_parser.add_argument("--input_dir", type=str, default=None, help="Directory containing .parquet files")
+    tok_parser.add_argument("--output_dir", type=str, default="data/algorithmic_bin", help="Output directory for .bin files")
     tok_parser.add_argument("--workers", type=int, default=mp.cpu_count())
 
     args = parser.parse_args()
 
     if args.command == "tokenize":
-        tokenize_dataset(Path(args.input_dir), Path(args.output_dir), args.workers)
+        input_dir = Path(args.input_dir or CACHE_DIR)
+        output_dir = Path(args.output_dir)
+        if not input_dir.exists():
+            print(f"Error: Input directory {input_dir} not found.")
+            return
+        tokenize_dataset(input_dir, output_dir, args.workers)
         return
 
     # Default to generate if no command or explicit generate
@@ -284,8 +290,11 @@ def main():
         config = load_config(args.config)
         gen_cfg = config["generation"]
         
+        gen_cfg = config["generation"]
+        
         # override from CLI or use config defaults
-        output_dir = Path(args.output_dir or gen_cfg["output_dir"])
+        # Default output to cache dir
+        output_dir = Path(args.output_dir or CACHE_DIR)
         num_examples = args.num_examples or gen_cfg["default_train_examples"]
         eval_per_task = args.eval_per_task or gen_cfg["default_eval_per_task"]
 
