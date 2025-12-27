@@ -259,7 +259,7 @@ def main():
     gen_parser.add_argument("--num_examples", type=int, default=None)
     gen_parser.add_argument("--eval_per_task", type=int, default=None)
     gen_parser.add_argument("--parallel", action="store_true")
-    gen_parser.add_argument("--num_workers", type=int, default=8)
+    gen_parser.add_argument("--num_workers", "--workers", type=int, default=8, dest="num_workers")
 
     # Tokenize command
     tok_parser = subparsers.add_parser("tokenize", help="Tokenize parquet to binary")
