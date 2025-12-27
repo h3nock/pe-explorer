@@ -50,8 +50,14 @@ def load_config() -> dict:
 
 
 def download_one(args: tuple[str, str, str]) -> str:
-    repo, filename, cache_dir = args
-    return hf_hub_download(repo, filename, repo_type="dataset", cache_dir=cache_dir)
+    repo, filename, output_dir = args
+    return hf_hub_download(
+        repo, 
+        filename, 
+        repo_type="dataset", 
+        local_dir=output_dir,
+        local_dir_use_symlinks=False
+    )
 
 def download(max_shards: int, num_workers: int = 8) -> None:
     """Download parquet shards from HuggingFace in parallel."""
@@ -63,9 +69,9 @@ def download(max_shards: int, num_workers: int = 8) -> None:
     files = files[:max_shards]
 
     print(f"Downloading {len(files)}/{cfg['total_shards']} shards with {num_workers} workers...")
-
-    cache_dir = str(CACHE_DIR / "hf_cache")
-    args = [(cfg["repo"], f, cache_dir) for f in files]
+    
+    # Download directly to CACHE_DIR (flat structure)
+    args = [(cfg["repo"], f, str(CACHE_DIR)) for f in files]
 
     paths = []
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
