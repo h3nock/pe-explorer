@@ -11,7 +11,8 @@ import argparse
 import json
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from pathlib import Path
-from multiprocessing import cpu_count
+import time
+from multiprocessing import cpu_count, Manager
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -85,7 +86,7 @@ def download(max_shards: int, num_workers: int = 8) -> None:
 
 def tokenize_worker(args: tuple) -> dict:
     """Worker function: tokenize input shards with streaming writes."""
-    worker_id, input_shards, output_dir = args
+    worker_id, input_shards, output_dir, queue = args
     
     # helper handles tiktoken init and optimized encoding
     tokenizer = Tokenizer(TOKENIZER_NAME)
@@ -133,6 +134,10 @@ def tokenize_worker(args: tuple) -> dict:
                 
                 total_tokens += doc_len
                 total_docs += 1
+        
+        # Report progress for this shard
+        if queue is not None:
+            queue.put(1)
     
     flush_buffer()
     writer.close()
@@ -168,13 +173,40 @@ def tokenize(num_workers: int = 8) -> None:
     print(f"Tokenizing {len(input_shards)} shards with {num_workers} workers...")
     print(f"  Output: {output_dir}")
     
-    # Parallel tokenization
-    worker_args = [(i, chunks[i], output_dir) for i in range(num_workers)]
-    
-    results = []
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        for result in tqdm(executor.map(tokenize_worker, worker_args), total=num_workers, desc="Workers"):
-            results.append(result)
+    with Manager() as manager:
+        queue = manager.Queue()
+        worker_args = [(i, chunks[i], output_dir, queue) for i in range(num_workers)]
+        
+        results = []
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            # submit all tasks
+            futures = [executor.submit(tokenize_worker, args) for args in worker_args]
+            
+            # monitor progress via queue
+            with tqdm(total=len(input_shards), desc="Tokenizing shards", unit="shard") as pbar:
+                processed_count = 0
+                while processed_count < len(input_shards):
+                    try:
+                        # poll to check for progress
+                        while not queue.empty():
+                            queue.get_nowait()
+                            pbar.update(1)
+                            processed_count += 1
+                    except Exception:
+                        pass
+                    
+                    if all(f.done() for f in futures):
+                        # drain remaining
+                        while not queue.empty():
+                            queue.get_nowait()
+                            pbar.update(1)
+                            processed_count += 1
+                        break
+                    
+                    time.sleep(0.5)
+
+            for f in futures:
+                results.append(f.result())
     
     # aggregate results
     total_tokens = sum(r["total_tokens"] for r in results)
