@@ -21,6 +21,15 @@ class PositionalEncoding(ABC, nn.Module):
         """True if the PE modifies the attention mechanism"""
         pass 
 
+    @property
+    def requires_embedding_scaling(self) -> bool:
+        """Whether to scale token embeddings by sqrt(d_model) before adding PE.
+        
+        required for fixed additive encodings (Sinusoidal, Binary, etc.) where
+        PE magnitude >> initialized embedding magnitude.
+        """
+        return False 
+
     @abstractmethod 
     def forward(self, seq_len: int, device: torch.device) -> torch.Tensor: 
         """Generate positional encoding for absolute PEs.
@@ -30,6 +39,6 @@ class PositionalEncoding(ABC, nn.Module):
         pass 
 
     def get_rope_fn(self): 
-        """Return a function to apply RoPE to Q, K""" 
+        """Returns a function(q, k) -> (q_rope, k_rope) or None if not using RoPE.""" 
         return None 
         

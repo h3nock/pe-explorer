@@ -1,3 +1,4 @@
+import math
 import torch 
 import torch.nn as nn 
 from typing import Optional 
@@ -51,6 +52,10 @@ class Transformer(nn.Module):
         """
         # token embeddings 
         x = self.token_embedding(x) 
+        
+        # scale embeddings if required by PE type (e.g. Sinusoidal)
+        if self.pe.requires_embedding_scaling:
+            x = x * math.sqrt(self.config.d_model) 
 
         # add positional encoding (if this PE type adds to embeddings)
         if self.pe.adds_to_embedding: 

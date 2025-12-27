@@ -14,6 +14,10 @@ class SinusoidalPE(PositionalEncoding):
     def adds_to_embedding(self) -> bool: 
         return True 
     
+    @property
+    def requires_embedding_scaling(self) -> bool:
+        return True
+    
     @property 
     def modifies_attention(self) -> bool: 
         return False 
