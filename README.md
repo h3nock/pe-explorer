@@ -73,13 +73,12 @@ pos-enc-bench/
 
 ## Model Sizes (Chinchilla-Optimal)
 
-| Size | Params | d_model | n_layers | n_heads | Optimal Tokens |
-|------|--------|---------|----------|---------|----------------|
-| XS | 1M | 128 | 4 | 4 | 20M |
-| S | 5M | 256 | 6 | 8 | 100M |
-| M | 25M | 512 | 8 | 8 | 500M |
-| L | 100M | 768 | 12 | 12 | 2B |
-| XL | 500M | 1024 | 24 | 16 | 10B |
+| Name | Params | d_model | n_layers | n_heads | Training Budget (20N) |
+|------|--------|---------|----------|---------|-----------------|
+| tiny | ~70M | 512 | 6 | 8 | 1.4B |
+| small | ~160M | 768 | 12 | 12 | 3.2B |
+| medium | ~410M | 1024 | 24 | 16 | 8.2B |
+| large | ~1B | 2048 | 16 | 32 | 20B |
 
 ## References
 
