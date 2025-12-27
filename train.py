@@ -40,7 +40,7 @@ def main():
     seed = args.seed
     
     base_checkpoint_dir = args.checkpoint_dir or f"checkpoints/{args.model_size}_{args.pe_type}_s{seed}"
-    warmup_steps = training_config.get("warmup_steps", 2000)
+
     log_interval = args.log_interval or eval_config.get("log_interval", 10)
     group_name = f"{args.model_size}_{args.pe_type}"
     
@@ -64,6 +64,10 @@ def main():
     
     effective_batch_size = batch_size * world_size * args.grad_accum_steps
     tokens_per_step = effective_batch_size * max_seq_len
+    
+    # dynamic warmup: min(config value, 3% of total steps)
+    max_train_steps = max_token_budget // tokens_per_step
+    warmup_steps = min(training_config.get("warmup_steps", 2000), int(0.03 * max_train_steps))
     
     # base config for wandb
     base_config = {
