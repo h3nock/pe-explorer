@@ -123,9 +123,44 @@ def test_transformer():
     print("All Transformer tests passed!\n")
 
 
+def test_transformer_with_rope():
+    """Test Transformer with RoPE positional encoding."""
+    print("Testing Transformer with RoPE...")
+    
+    config = ModelConfig(
+        d_model=D_MODEL,
+        n_heads=N_HEADS,
+        n_layers=N_LAYERS,
+        d_ff=D_FF,
+        max_seq_len=SEQ_LEN,
+        vocab_size=VOCAB_SIZE,
+        pe_type="rope",
+    )
+    
+    model = Transformer(config)
+    
+    # RoPE should not add to embeddings
+    assert model.pe.adds_to_embedding is False
+    assert model.pe.modifies_attention is True
+    
+    x = torch.randint(0, VOCAB_SIZE, (BATCH_SIZE, SEQ_LEN))
+    logits = model(x)
+    
+    # shape test
+    expected_shape = (BATCH_SIZE, SEQ_LEN, VOCAB_SIZE)
+    assert logits.shape == expected_shape, f"Shape mismatch: {logits.shape} != {expected_shape}"
+    print(f"Input: {x.shape}, Output: {logits.shape} - Shape test passed!")
+    
+    # gradient test
+    logits.sum().backward()
+    assert model.token_embedding.weight.grad is not None, "No gradient for embeddings"
+    print("Gradient test passed!")
+    print("All Transformer with RoPE tests passed!\n")
+
+
 if __name__ == "__main__":
     test_attention()
     test_mlp()
     test_transformer_block()
     test_transformer()
-
+    test_transformer_with_rope()

@@ -11,7 +11,7 @@ class BinaryPE(PositionalEncoding):
             pos=7, d_model=8 -> [-1,-1,-1,-1,-1,1,1]
     """
     
-    def __init__(self, d_model: int, max_seq_len: int, normalize: bool = False): 
+    def __init__(self, d_model: int, max_seq_len: int, normalize: bool = False, **kwargs): 
         super().__init__(d_model, max_seq_len) 
         self.normalize = normalize
         pe = self._create_pe_matrix(max_seq_len, d_model)

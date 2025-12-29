@@ -7,6 +7,7 @@ from src.encodings.none import NoPE
 from src.encodings.sinusoidal import SinusoidalPE
 from src.encodings.binary import BinaryPE
 from src.encodings.decimal import DecimalPE
+from src.encodings.rope import RoPE
 
 
 PE_REGISTRY: Dict[str, Union[Type[PositionalEncoding], Callable[..., PositionalEncoding]]] = {
@@ -16,6 +17,7 @@ PE_REGISTRY: Dict[str, Union[Type[PositionalEncoding], Callable[..., PositionalE
     "binary_norm": partial(BinaryPE, normalize=True),
     "decimal": partial(DecimalPE, normalize=False),
     "decimal_norm": partial(DecimalPE, normalize=True),
+    "rope": RoPE,
 }
 
 
@@ -23,7 +25,7 @@ def get_pe(pe_type: str, d_model: int, max_seq_len: int, **kwargs) -> Positional
     """Create a positional encoding instance.
     
     Args:
-        pe_type: type of positional encoding ("sinusoidal", "none", ...)
+        pe_type: type of positional encoding
         d_model: model dimension
         max_seq_len: maximum sequence length
         **kwargs: additional PE specific parameters

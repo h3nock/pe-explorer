@@ -17,7 +17,7 @@ class Transformer(nn.Module):
         self.token_embedding = nn.Embedding(config.vocab_size, config.d_model) 
 
         # positional encoding
-        self.pe = get_pe(config.pe_type, config.d_model, config.max_seq_len, **config.pe_params)  
+        self.pe = get_pe(config.pe_type, config.d_model, config.max_seq_len, n_heads=config.n_heads, **config.pe_params)  
 
         # initialize embeddings 
         self.token_embedding.weight.data.normal_(mean=0.0, std=0.02)

@@ -4,7 +4,7 @@ from src.encodings.base import PositionalEncoding
 
 class SinusoidalPE(PositionalEncoding): 
     """Sinusoidal positional encoding.""" 
-    def __init__(self, d_model: int, max_seq_len: int, base: int = 10000): 
+    def __init__(self, d_model: int, max_seq_len: int, base: int = 10000, **kwargs): 
         super().__init__(d_model, max_seq_len) 
         self.base = base 
         pe = self._create_pe_matrix(max_seq_len, d_model)

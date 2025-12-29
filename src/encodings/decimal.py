@@ -11,7 +11,7 @@ class DecimalPE(PositionalEncoding):
             pos=42, d_model=8 → [0,0,0,0,0,0,4,2]
     """
     
-    def __init__(self, d_model: int, max_seq_len: int, normalize: bool = True): 
+    def __init__(self, d_model: int, max_seq_len: int, normalize: bool = True, **kwargs): 
         super().__init__(d_model, max_seq_len) 
         self.normalize = normalize
         pe = self._create_pe_matrix(max_seq_len, d_model)

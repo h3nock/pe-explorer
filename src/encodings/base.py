@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 
 class PositionalEncoding(ABC, nn.Module):
     """Abstract base class for positional encodings."""
-    def __init__(self, d_model: int, max_seq_len: int):
+    def __init__(self, d_model: int, max_seq_len: int, **kwargs):
         super().__init__()
         self.d_model = d_model
         self.max_seq_len = max_seq_len 
