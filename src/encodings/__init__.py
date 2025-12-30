@@ -5,6 +5,7 @@ from typing import Callable, Dict, Type, Union
 from src.encodings.base import PositionalEncoding
 from src.encodings.none import NoPE
 from src.encodings.sinusoidal import SinusoidalPE
+from src.encodings.sinonly import SinOnlyPE
 from src.encodings.binary import BinaryPE
 from src.encodings.decimal import DecimalPE
 from src.encodings.rope import RoPE
@@ -13,6 +14,7 @@ from src.encodings.rope import RoPE
 PE_REGISTRY: Dict[str, Union[Type[PositionalEncoding], Callable[..., PositionalEncoding]]] = {
     "none": NoPE,
     "sinusoidal": SinusoidalPE,
+    "sinonly": SinOnlyPE,
     "binary": partial(BinaryPE, normalize=False),
     "binary_norm": partial(BinaryPE, normalize=True),
     "decimal": partial(DecimalPE, normalize=False),

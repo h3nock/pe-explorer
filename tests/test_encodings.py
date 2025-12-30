@@ -5,6 +5,7 @@ import torch
 from src.encodings import get_pe
 from src.encodings.none import NoPE
 from src.encodings.sinusoidal import SinusoidalPE
+from src.encodings.sinonly import SinOnlyPE
 from src.encodings.binary import BinaryPE
 from src.encodings.decimal import DecimalPE
 from src.encodings.rope import RoPE
@@ -36,6 +37,27 @@ class TestSinusoidalPE:
     
     def test_different_positions_different_encodings(self):
         pe = SinusoidalPE(d_model=64, max_seq_len=256)
+        out = pe(seq_len=10, device=torch.device("cpu"))
+        # no two positions should have identical encodings
+        for i in range(10):
+            for j in range(i + 1, 10):
+                assert not torch.allclose(out[0, i], out[0, j])
+
+
+class TestSinOnlyPE:
+    def test_output_shape(self):
+        pe = SinOnlyPE(d_model=128, max_seq_len=512)
+        out = pe(seq_len=32, device=torch.device("cpu"))
+        assert out.shape == (1, 32, 128)
+    
+    def test_values_in_range(self):
+        pe = SinOnlyPE(d_model=64, max_seq_len=256)
+        out = pe(seq_len=100, device=torch.device("cpu"))
+        assert out.min() >= -1.0
+        assert out.max() <= 1.0
+    
+    def test_different_positions_different_encodings(self):
+        pe = SinOnlyPE(d_model=64, max_seq_len=256)
         out = pe(seq_len=10, device=torch.device("cpu"))
         # no two positions should have identical encodings
         for i in range(10):
