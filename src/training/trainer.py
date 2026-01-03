@@ -2,6 +2,7 @@ import os
 import time
 import random
 import pickle
+from dataclasses import asdict, is_dataclass
 import torch
 import wandb
 import numpy as np
@@ -39,7 +40,22 @@ def format_budget(budget: int) -> str:
 
 
 class Trainer: 
-    def __init__(self, model: nn.Module, optimizer: torch.optim.Optimizer, rank: int, local_rank: int, world_size: int, batch_size: int, max_seq_len: int, grad_accum_steps: int = 1, grad_clip: float = 1.0, warmup_steps: int = 2000, checkpoint_interval: int = 5000, checkpoint_dir: str = "checkpoints"):
+    def __init__(
+        self,
+        model: nn.Module,
+        optimizer: torch.optim.Optimizer,
+        rank: int,
+        local_rank: int,
+        world_size: int,
+        batch_size: int,
+        max_seq_len: int,
+        grad_accum_steps: int = 1,
+        grad_clip: float = 1.0,
+        warmup_steps: int = 2000,
+        checkpoint_interval: int = 5000,
+        checkpoint_dir: str = "checkpoints",
+        run_metadata: dict | None = None,
+    ):
         """Initialize trainer with core settings. Call configure_wsd() after loading checkpoint."""
         self.rank = rank 
         self.local_rank = local_rank 
@@ -53,6 +69,7 @@ class Trainer:
         self.checkpoint_interval = checkpoint_interval
         self.checkpoint_dir = checkpoint_dir
         self.tokens_per_step = batch_size * max_seq_len * grad_accum_steps * world_size
+        self.run_metadata = run_metadata
 
         # training state (will be restored from checkpoint or defaults)
         self.step = 0
@@ -252,6 +269,13 @@ class Trainer:
             'samples_seen': self.samples_seen,
         }
         
+        model_obj = self.model.module if hasattr(self.model, "module") else self.model
+        model_config = getattr(model_obj, "config", None)
+        if model_config is not None:
+            checkpoint["config"] = asdict(model_config) if is_dataclass(model_config) else model_config
+        if self.run_metadata:
+            checkpoint["run_metadata"] = self.run_metadata
+
         if self.scaler is not None:
             checkpoint['scaler_state_dict'] = self.scaler.state_dict()
         
@@ -266,6 +290,17 @@ class Trainer:
         """Load training checkpoint and restore all state for exact resumption."""
         self.resume_checkpoint_path = path  # remember where we loaded from
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+
+        model_obj = self.model.module if hasattr(self.model, "module") else self.model
+        model_config = getattr(model_obj, "config", None)
+        ckpt_config = checkpoint.get("config")
+        if model_config is not None and ckpt_config is not None:
+            current_config = asdict(model_config) if is_dataclass(model_config) else model_config
+            if current_config != ckpt_config:
+                raise ValueError(
+                    "Checkpoint config does not match current model config. "
+                    "Recreate the model from the checkpoint config to resume safely."
+                )
         
         # Restore model and optimizer
         if hasattr(self.model, 'module'):

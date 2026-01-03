@@ -77,6 +77,18 @@ def main():
         "batch_size": batch_size,
         "seed": seed,
     }
+
+    run_metadata = {
+        "model_size": args.model_size,
+        "pe_type": args.pe_type,
+        "seed": seed,
+        "tokenizer_name": "gpt2",
+        "size_config": config,
+        "training_config": training_config,
+        "eval_config": eval_config,
+        "data_config": data_config,
+        "cli_args": vars(args),
+    }
     
     trainer = Trainer(
         model=model,
@@ -91,6 +103,7 @@ def main():
         warmup_steps=warmup_steps,
         checkpoint_interval=max(max_token_budget // tokens_per_step // 20, 25),
         checkpoint_dir=base_checkpoint_dir,
+        run_metadata=run_metadata,
     )
     
     checkpoint = None
