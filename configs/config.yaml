@@ -67,13 +67,38 @@ training:
   dropout: 0.0 
 
 evaluation:
+  # training-time eval 
   eval_interval: 500
   eval_tokens: 1_000_000
   log_interval: 10
   checkpoint_interval: 5000
+  
+  # post-training eval settings
+  post_training:
+    # tier 1: perplexity
+    ppl:
+      datasets: [wikitext103, pg19]
+      context_lengths: [512, 1024, 2048, 4096, 8192]  # includes extrapolation
+      max_tokens: 1_000_000
+    
+    # tier 2: algorithmic
+    algorithmic:
+      tasks: [addition, sorting, reversal, copy]
+      max_examples_per_split: 500
+      modes: [zero_shot, few_shot]
+    
+    # tier 3: position-dependent retrieval
+    passkey:
+      context_lengths: [512, 1024, 2048, 4096, 8192]
+      samples_per_context: 100
+      positions: [beginning, middle, end]
+    niah:  # needle-in-a-haystack sweep
+      context_lengths: [512, 1024, 2048, 4096, 8192]
+      position_percentages: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+      samples_per_cell: 20
 
 data:
-  # fineWeb-Edu source (karpathy's pre-shuffled version)
+  # fineWeb-Edu source 
   fineweb:
     repo: "karpathy/fineweb-edu-100b-shuffle"
     total_shards: 1822           # total available (100B tokens)
