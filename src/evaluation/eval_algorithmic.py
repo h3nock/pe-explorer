@@ -137,15 +137,18 @@ class AlgorithmicEvaluator(BaseEvaluator):
             prompt_tensor,
             max_new_tokens=max_new_tokens,
             temperature=0.0,
+            eos_token=self.tokenizer.eot_token,
         )
 
         # decode only the generated part
         generated_tokens = output_tokens[0, len(prompt_tokens):].tolist()
         generated_text = self.tokenizer.decode(generated_tokens)
 
-        # extract answer - only stop at newline (commas/spaces are valid in answers like [1,2,3])
+        # extract answer - stop at EOT or newline (commas/spaces are valid in answers like [1,2,3])
+        if "<|endoftext|>" in generated_text:
+            generated_text = generated_text.split("<|endoftext|>", 1)[0]
         if "\n" in generated_text:
-            generated_text = generated_text.split("\n")[0]
+            generated_text = generated_text.split("\n", 1)[0]
 
         # exact match
         is_correct = generated_text.strip() == answer.strip()
