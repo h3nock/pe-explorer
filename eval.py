@@ -82,13 +82,13 @@ def run_evaluation(args) -> dict:
         evaluator = AlgorithmicEvaluator(checkpoint_path=args.checkpoint, config_path=args.config)
         
         # Zero-shot
-        alg_results = evaluator.evaluate(use_few_shot=False)
+        alg_results = evaluator.evaluate(use_few_shot=False, verbose=args.verbose)
         results.update({f"zeroshot_{k}": v for k, v in alg_results.items() 
                        if "_accuracy" in k or "_correct" in k})
         
         # Few-shot
         if args.few_shot:
-            alg_results_fs = evaluator.evaluate(use_few_shot=True)
+            alg_results_fs = evaluator.evaluate(use_few_shot=True, verbose=args.verbose)
             results.update({f"fewshot_{k}": v for k, v in alg_results_fs.items() 
                            if "_accuracy" in k or "_correct" in k})
     
@@ -149,6 +149,8 @@ Examples:
                        help="Context lengths to test")
     parser.add_argument("--few-shot", action="store_true",
                        help="Include few-shot evaluation for algorithmic")
+    parser.add_argument("--verbose", action="store_true",
+                       help="Print per-example outputs for algorithmic eval")
     parser.add_argument("--max-tokens", type=int,
                        help="Max tokens for PPL evaluation")
     parser.add_argument("--samples", type=int,

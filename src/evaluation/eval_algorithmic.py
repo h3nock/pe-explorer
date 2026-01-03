@@ -125,7 +125,8 @@ class AlgorithmicEvaluator(BaseEvaluator):
         prompt: str,
         answer: str,
         max_new_tokens: int = 256,
-    ) -> bool:
+        return_generated: bool = False,
+    ) -> bool | tuple[bool, str]:
         """Evaluate a single example."""
         # tokenize prompt
         prompt_tokens = self.tokenizer.encode(prompt)
@@ -147,13 +148,17 @@ class AlgorithmicEvaluator(BaseEvaluator):
             generated_text = generated_text.split("\n")[0]
 
         # exact match
-        return generated_text.strip() == answer.strip()
+        is_correct = generated_text.strip() == answer.strip()
+        if return_generated:
+            return is_correct, generated_text
+        return is_correct
     
     def evaluate_task(
         self,
         task: str,
         examples: list[tuple[str, str]],
         use_few_shot: bool = False,
+        verbose: bool = False,
         max_new_tokens: int = 256,
     ) -> dict[str, float]:
         """Evaluate a single task."""
@@ -161,10 +166,30 @@ class AlgorithmicEvaluator(BaseEvaluator):
         total = len(examples)
         
         for prompt, answer in tqdm(examples, desc=f"{task}", leave=False):
-            if use_few_shot:
-                prompt = self.build_few_shot_prompt(task, prompt)
-            
-            if self.evaluate_single(prompt, answer, max_new_tokens):
+            eval_prompt = self.build_few_shot_prompt(task, prompt) if use_few_shot else prompt
+
+            if verbose:
+                is_correct, generated_text = self.evaluate_single(
+                    eval_prompt,
+                    answer,
+                    max_new_tokens,
+                    return_generated=True,
+                )
+                detail = "\n".join(
+                    [
+                        "-" * 40,
+                        f"task: {task}",
+                        f"prompt: {eval_prompt!r}",
+                        f"expected: {answer!r}",
+                        f"generated: {generated_text!r}",
+                        f"correct: {is_correct}",
+                    ]
+                )
+                tqdm.write(detail)
+            else:
+                is_correct = self.evaluate_single(eval_prompt, answer, max_new_tokens)
+
+            if is_correct:
                 correct += 1
         
         return {"accuracy": correct / total if total > 0 else 0.0, "correct": correct, "total": total}
@@ -208,6 +233,7 @@ class AlgorithmicEvaluator(BaseEvaluator):
         self,
         tasks: list[str] | None = None,
         use_few_shot: bool = False,
+        verbose: bool = False,
         max_examples_per_split: int = 500,
     ) -> dict[str, Any]:
         """Run evaluation on all or specified tasks."""
@@ -233,7 +259,7 @@ class AlgorithmicEvaluator(BaseEvaluator):
 
             # evaluate ID
             if id_examples:
-                id_result = self.evaluate_task(task, id_examples, use_few_shot)
+                id_result = self.evaluate_task(task, id_examples, use_few_shot, verbose=verbose)
                 results[f"{task}_id_accuracy"] = id_result["accuracy"]
                 results[f"{task}_id_correct"] = id_result["correct"]
                 results[f"{task}_id_total"] = id_result["total"]
@@ -241,7 +267,7 @@ class AlgorithmicEvaluator(BaseEvaluator):
 
             # evaluate OOD
             if ood_examples:
-                ood_result = self.evaluate_task(task, ood_examples, use_few_shot)
+                ood_result = self.evaluate_task(task, ood_examples, use_few_shot, verbose=verbose)
                 results[f"{task}_ood_accuracy"] = ood_result["accuracy"]
                 results[f"{task}_ood_correct"] = ood_result["correct"]
                 results[f"{task}_ood_total"] = ood_result["total"]
@@ -265,6 +291,7 @@ def main():
     parser.add_argument("--task", type=str, choices=list(TASK_CONFIG.keys()), help="Specific task to evaluate")
     parser.add_argument("--all", action="store_true", help="Evaluate all tasks")
     parser.add_argument("--few-shot", action="store_true", help="Use few-shot prompting")
+    parser.add_argument("--verbose", action="store_true", help="Print per-example outputs")
     parser.add_argument("--max-examples", type=int, default=500, help="Max examples per split")
     parser.add_argument("--output", type=str, help="Output JSON path")
     parser.add_argument("--eval-data", type=str, default=str(DEFAULT_EVAL_PATH))
@@ -284,6 +311,7 @@ def main():
     results = evaluator.evaluate(
         tasks=tasks,
         use_few_shot=args.few_shot,
+        verbose=args.verbose,
         max_examples_per_split=args.max_examples,
     )
     
