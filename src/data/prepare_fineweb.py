@@ -9,6 +9,7 @@ Usage:
 """
 import argparse
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from pathlib import Path
 import time
@@ -33,21 +34,57 @@ BUFFER_SIZE = 1_000_000   # 1M token buffer per worker (~2MB)
 # vocab info for metadata (GPT-2 = 50257, fits in uint16)
 VOCAB_SIZE = tiktoken.get_encoding(TOKENIZER_NAME).n_vocab
 
+# overridden by configs/config.yaml if specified
+DEFAULT_TRAINING_SHARDS = (0, 880)
+DEFAULT_VALIDATION_SHARDS = (881, 890)
+DEFAULT_FILLER_SHARDS = (891, 910)
+
 
 def load_config() -> dict:
-    """Load data.fineweb config with defaults."""
+    """Load data.fineweb config with defaults and validation.
+    
+    Validates:
+        - training, validation, and filler shards are disjoint
+        - filler_shards is within downloaded range
+    """
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, encoding="utf-8") as f:
             cfg = (yaml.safe_load(f) or {}).get("data", {}).get("fineweb", {})
     else:
         cfg = {}
-    return {
+    
+    config = {
         "repo": cfg.get("repo", "karpathy/fineweb-edu-100b-shuffle"),
         "total_shards": cfg.get("total_shards", 1822),
         "download_shards": cfg.get("download_shards", 911),
         "tokens_per_shard": cfg.get("tokens_per_shard", 55_000_000),
         "tokenized_path": cfg.get("tokenized_path", "data/fineweb_bin"),
+        # shard partitions (inclusive bounds)
+        "training_shards": cfg.get("training_shards", list(DEFAULT_TRAINING_SHARDS)),
+        "validation_shards": cfg.get("validation_shards", list(DEFAULT_VALIDATION_SHARDS)),
+        "filler_shards": cfg.get("filler_shards", list(DEFAULT_FILLER_SHARDS)),
     }
+    
+    # partitions must be disjoint: training < validation < filler
+    train_end = config["training_shards"][1]
+    val_start, val_end = config["validation_shards"]
+    filler_start = config["filler_shards"][0]
+    
+    if train_end >= val_start:
+        raise ValueError(f"Overlap: training ends at {train_end}, validation starts at {val_start}")
+    if val_end >= filler_start:
+        raise ValueError(f"Overlap: validation ends at {val_end}, filler starts at {filler_start}")
+    
+    # filler must be within download range
+    filler_end = config["filler_shards"][1]
+    download_max = config["download_shards"] - 1
+    if filler_end > download_max:
+        raise ValueError(
+            f"Filler shards [{filler_start}, {filler_end}] exceed download range [0, {download_max}]. "
+            f"Increase download_shards to at least {filler_end + 1}."
+        )
+    
+    return config
 
 
 def download_one(args: tuple[str, str, str]) -> str:
@@ -60,6 +97,14 @@ def download_one(args: tuple[str, str, str]) -> str:
         local_dir_use_symlinks=False
     )
 
+
+def extract_shard_index(filepath: str) -> int | None:
+    """Extract shard index from FineWeb filename (e.g., 'train-00042-of-01822.parquet' -> 42)."""
+    # fineWeb-Edu uses: train-NNNNN-of-TOTAL.parquet
+    if match := re.search(r"train-(\d+)-of-\d+\.parquet$", Path(filepath).name):
+        return int(match.group(1))
+    return None
+
 def download(max_shards: int, num_workers: int = 8) -> None:
     """Download parquet shards from HuggingFace in parallel."""
     cfg = load_config()
@@ -71,7 +116,6 @@ def download(max_shards: int, num_workers: int = 8) -> None:
 
     print(f"Downloading {len(files)}/{cfg['total_shards']} shards with {num_workers} workers...")
     
-    # Download directly to CACHE_DIR (flat structure)
     args = [(cfg["repo"], f, str(CACHE_DIR)) for f in files]
 
     paths = []
@@ -150,27 +194,53 @@ def tokenize_worker(args: tuple) -> dict:
     }
 
 
-def tokenize(num_workers: int = 8) -> None:
-    """Parallel tokenization: each worker handles a range of input shards."""
+def filter_shards_by_range(all_shards: list[str], shard_range: tuple[int, int]) -> list[str]:
+    """Filter shard paths to those within the given index range."""
+    start_idx, end_idx = shard_range
+    return [p for p in all_shards
+            if (idx := extract_shard_index(p)) is not None and start_idx <= idx <= end_idx]
+
+
+def tokenize(num_workers: int = 8, split: str = "train") -> None:
+    """Parallel tokenization for training or validation shards.
+    
+    Args:
+        num_workers: Number of parallel workers
+        split: 'train' or 'val' - determines which shard range to use
+    """
     manifest_path = CACHE_DIR / "manifest.json"
     if not manifest_path.exists():
         print("No shards found. Run 'download' first.")
         return
 
     with open(manifest_path, encoding="utf-8") as f:
-        input_shards = json.load(f)["shards"]
+        all_shards = json.load(f)["shards"]
 
     cfg = load_config()
+    
+    # select shard range based on split
+    if split == "train":
+        shard_range = tuple(cfg["training_shards"])
+        output_subdir = "train"
+    elif split == "val":
+        shard_range = tuple(cfg["validation_shards"])
+        output_subdir = "val"
+    else:
+        raise ValueError(f"Unknown split: {split}. Use 'train' or 'val'.")
+    
+    selected_shards = filter_shards_by_range(all_shards, shard_range)
+    
+    if not selected_shards:
+        print(f"No shards found for {split} in range {shard_range}.")
+        return
 
-    # Output from config (expanduser to handle ~)
-    output_dir = Path(cfg["tokenized_path"]).expanduser()
+    output_dir = Path(cfg["tokenized_path"]).expanduser() / output_subdir
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Split input shards across workers
-    num_workers = min(num_workers, len(input_shards))
-    chunks = [input_shards[i::num_workers] for i in range(num_workers)]
+    num_workers = min(num_workers, len(selected_shards))
+    chunks = [selected_shards[i::num_workers] for i in range(num_workers)]
     
-    print(f"Tokenizing {len(input_shards)} shards with {num_workers} workers...")
+    print(f"Tokenizing {len(selected_shards)} {split} shards with {num_workers} workers...")
     print(f"  Output: {output_dir}")
     
     with Manager() as manager:
@@ -179,15 +249,12 @@ def tokenize(num_workers: int = 8) -> None:
         
         results = []
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            # submit all tasks
             futures = [executor.submit(tokenize_worker, args) for args in worker_args]
             
-            # monitor progress via queue
-            with tqdm(total=len(input_shards), desc="Tokenizing shards", unit="shard") as pbar:
+            with tqdm(total=len(selected_shards), desc="Tokenizing shards", unit="shard") as pbar:
                 processed_count = 0
-                while processed_count < len(input_shards):
+                while processed_count < len(selected_shards):
                     try:
-                        # poll to check for progress
                         while not queue.empty():
                             queue.get_nowait()
                             pbar.update(1)
@@ -196,7 +263,6 @@ def tokenize(num_workers: int = 8) -> None:
                         pass
                     
                     if all(f.done() for f in futures):
-                        # drain remaining
                         while not queue.empty():
                             queue.get_nowait()
                             pbar.update(1)
@@ -208,24 +274,23 @@ def tokenize(num_workers: int = 8) -> None:
             for f in futures:
                 results.append(f.result())
     
-    # aggregate results
     total_tokens = sum(r["total_tokens"] for r in results)
     total_docs = sum(r["total_docs"] for r in results)
-    all_shards = []
+    all_shard_paths = []
     for r in results:
-        all_shards.extend(r["shard_paths"])
+        all_shard_paths.extend(r["shard_paths"])
     
-    # save metadata 
     dtype_str = "uint16" if VOCAB_SIZE <= (np.iinfo(np.uint16).max + 1) else "uint32"
     meta = {
+        "split": split,
+        "shard_range": list(shard_range),
         "total_tokens": total_tokens,
         "total_docs": total_docs,
-        "num_shards": len(all_shards),
+        "num_shards": len(all_shard_paths),
         "shard_size": SHARD_SIZE,
         "dtype": dtype_str,
         "vocab_size": VOCAB_SIZE,
-        # Store relative paths (filenames) for portability
-        "shards": sorted([Path(p).name for p in all_shards]),
+        "shards": sorted([Path(p).name for p in all_shard_paths]),
     }
     with open(output_dir / "meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
@@ -233,7 +298,7 @@ def tokenize(num_workers: int = 8) -> None:
     print(f"\nDone!")
     print(f"  Documents: {total_docs:,}")
     print(f"  Tokens: {total_tokens:,}")
-    print(f"  Shards: {len(all_shards)}")
+    print(f"  Shards: {len(all_shard_paths)}")
 
 
 def info():
@@ -253,16 +318,19 @@ def info():
     else:
         print("Downloaded: 0 shards")
 
-    # Use config path for meta.json
     output_dir = Path(cfg["tokenized_path"]).expanduser()
-    meta = output_dir / "meta.json"
-    
-    if meta.exists():
-        with open(meta, encoding="utf-8") as f:
-            m = json.load(f)
-        print(f"Tokenized: {m['total_tokens']:,} tokens across {m['num_shards']} shards")
-        print(f"  Path: {output_dir}")
-        print(f"  Dtype: {m.get('dtype', 'uint16')} (vocab: {m.get('vocab_size', 'unknown')})")
+    train_meta = output_dir / "train" / "meta.json"
+    val_meta = output_dir / "val" / "meta.json"
+
+    if train_meta.exists() or val_meta.exists():
+        for split, path in (("train", train_meta), ("val", val_meta)):
+            if not path.exists():
+                continue
+            with open(path, encoding="utf-8") as f:
+                m = json.load(f)
+            print(f"Tokenized ({split}): {m['total_tokens']:,} tokens across {m['num_shards']} shards")
+            print(f"  Path: {path.parent}")
+            print(f"  Dtype: {m.get('dtype', 'uint16')} (vocab: {m.get('vocab_size', 'unknown')})")
     else:
         print(f"Tokenized: not yet (checked {output_dir})")
 
@@ -281,6 +349,8 @@ def main():
     # tokenize
     tok = sub.add_parser("tokenize", help="Tokenize to binary shards")
     tok.add_argument("--workers", type=int, default=cpu_count(), help="Number of workers")
+    tok.add_argument("--split", choices=["train", "val", "all"], default="all",
+                     help="Which split to tokenize (default: all)")
 
     # info
     sub.add_parser("info", help="Show status")
@@ -290,7 +360,11 @@ def main():
     if args.cmd == "download":
         download(args.max_shards, args.workers)
     elif args.cmd == "tokenize":
-        tokenize(args.workers)
+        if args.split == "all":
+            tokenize(args.workers, split="train")
+            tokenize(args.workers, split="val")
+        else:
+            tokenize(args.workers, split=args.split)
     elif args.cmd == "info":
         info()
     else:
