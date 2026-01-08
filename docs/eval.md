@@ -18,10 +18,10 @@
 | Task | Dataset | Metric |
 | :--- | :--- | :--- |
 | Passkey Retrieval | Synthetic (512-8k) | Accuracy |
-| LAMBADA | HuggingFace | Accuracy |
+| NIAH Sweep | Synthetic (512-8k) | Accuracy Heatmap |
 
 ## Scripts
 - `src/evaluation/eval_ppl.py` - WikiText-103 / PG-19
 - `src/evaluation/eval_algorithmic.py` - Algorithmic tasks
 - `src/evaluation/eval_passkey.py` - Passkey retrieval
-- `src/evaluation/eval_lambada.py` - LAMBADA
+- `src/evaluation/eval_niah.py` - Needle-in-a-Haystack sweep

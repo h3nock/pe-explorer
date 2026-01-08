@@ -73,12 +73,16 @@ pos-enc-bench/
 
 ## Model Sizes (Chinchilla-Optimal)
 
-| Name | Params | d_model | n_layers | n_heads | Training Budget (20N) |
-|------|--------|---------|----------|---------|-----------------|
-| tiny | ~70M | 512 | 6 | 8 | 1.4B |
-| small | ~160M | 768 | 12 | 12 | 3.2B |
-| medium | ~410M | 1024 | 24 | 16 | 8.2B |
-| large | ~1B | 2048 | 16 | 32 | 20B |
+Parameter counts depend on weight tying configuration (`tie_embedding` in config):
+
+| Name | Params (tied) | Params (untied) | d_model | n_layers | n_heads | Training Budget (20N) |
+|------|---------------|-----------------|---------|----------|---------|----------------------|
+| tiny | ~45M | ~70M | 512 | 6 | 8 | 1.4B |
+| small | ~124M | ~162M | 768 | 12 | 12 | 3.2B |
+| medium | ~354M | ~405M | 1024 | 24 | 16 | 8.2B |
+| large | ~908M | ~1.01B | 2048 | 16 | 32 | 20B |
+
+> **Note**: Weight tying shares the token embedding matrix with the LM head, reducing parameters by `vocab_size × d_model` (~25-100M depending on model size).
 
 ## References
 

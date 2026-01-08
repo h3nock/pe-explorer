@@ -72,6 +72,52 @@ class Transformer(nn.Module):
         logits = self.lm_head(x) 
         return logits
 
+    @torch.inference_mode()
+    def generate(
+        self,
+        prompt_tokens: torch.Tensor,
+        max_new_tokens: int,
+        temperature: float = 0.0,
+        eos_token: int | None = None,
+    ) -> torch.Tensor:
+        """
+        Autoregressive text generation.
+        
+        Args:
+            prompt_tokens: (batch_size, seq_len) input token ids
+            max_new_tokens: Maximum number of tokens to generate
+            temperature: 0.0 for greedy, > 0 for sampling
+            eos_token: Stop generation if this token is produced
+            
+        Returns:
+            (batch_size, seq_len + generated) full sequence including prompt
+        """
+        tokens = prompt_tokens
+
+        for _ in range(max_new_tokens):
+            # use full context - PEs extend dynamically for long-context eval
+            context = tokens
+
+            # forward pass
+            logits = self(context)
+            next_logits = logits[:, -1, :]  # (batch, vocab)
+
+            # sample or greedy
+            if temperature == 0.0:
+                next_token = next_logits.argmax(dim=-1, keepdim=True)
+            else:
+                probs = torch.softmax(next_logits / temperature, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+            
+            # Append
+            tokens = torch.cat([tokens, next_token], dim=1)
+            
+            # Check EOS
+            if eos_token is not None and (next_token == eos_token).all():
+                break
+        
+        return tokens
+
             
          
 

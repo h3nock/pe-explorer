@@ -1,30 +1,67 @@
 # Synthetic Data Generation Config
 
-tasks:
-  addition:
-    weight: 0.4
-    train_range: [1, 20]   # number of digits per operand
-    eval_range: [21, 40]   # extrapolation: longer than training
-    
-  sorting:
-    weight: 0.3
-    train_range: [1, 10]   # number of items to sort
-    eval_range: [11, 20]
-    
-  reversal:
-    weight: 0.2
-    train_range: [1, 20]   # string length (characters)
-    eval_range: [21, 40]
-    
-  copy:
-    weight: 0.1
-    train_range: [1, 50]   # string length (characters)
-    eval_range: [51, 100]
+content_sampling:
+  digit: 0.5
+  char: 0.5
 
-# Generation Settings
+tasks:
+  passkey:
+    weight: 0.20
+    code_len: [1, 5]
+    # distances: fraction of context where target info is placed
+    # 0.25 = near start (easy), 1.0 = end of training context, >1.0 = beyond training (extrapolation test)
+    distances:
+      train: [0.25, 0.5, 0.75, 1.0]
+      eval_id: [0.25, 0.5, 0.75, 1.0]
+      eval_ood: [1.5, 2.0]
+
+  copy_distance:
+    weight: 0.25
+    content_len: 5
+    # distances: how far back the content to copy is placed
+    distances:
+      train: [0.25, 0.5, 0.75, 1.0]
+      eval_id: [0.25, 0.5, 0.75, 1.0]
+      eval_ood: [1.5, 2.0]
+
+  reverse:
+    weight: 0.18
+    length:
+      train: [3, 8]
+      eval_id: [3, 8]
+      eval_ood: [9, 16]
+
+  sort:
+    weight: 0.17
+    length:
+      train: [3, 6]
+      eval_id: [3, 6]
+      eval_ood: [7, 10]
+
+  no_carry_add:
+    weight: 0.12
+    digits: [0, 4]
+    length:
+      train: [2, 5]
+      eval_id: [2, 5]
+      eval_ood: [6, 8]
+
+  simple_copy:
+    weight: 0.08
+    length:
+      train: [4, 12]
+      eval_id: [4, 12]
+      eval_ood: [13, 20]
+
+filler:
+  pool_path: "data/filler_pool.parquet"
+  context_len: 1024
+  eval_context_len: 2048
+
 generation:
   output_dir: data/algorithmic
-  train_seed: 42           # fixed seed for reproducibility
-  eval_seed: 123           # different seed to avoid train/eval overlap
-  default_train_examples: 1000000
-  default_eval_per_task: 1000
+  train_seed: 42
+  eval_seed: 123
+  num_train_examples: 1000000  # total synthetic training examples
+  num_eval_per_task: 1000      # eval examples per task (split id/ood)
+  shard_size: 250000           # examples per output parquet file
