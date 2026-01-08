@@ -99,9 +99,8 @@ def download_one(args: tuple[str, str, str]) -> str:
 
 
 def extract_shard_index(filepath: str) -> int | None:
-    """Extract shard index from FineWeb filename (e.g., 'train-00042-of-01822.parquet' -> 42)."""
-    # fineWeb-Edu uses: train-NNNNN-of-TOTAL.parquet
-    if match := re.search(r"train-(\d+)-of-\d+\.parquet$", Path(filepath).name):
+    """Extract shard index from filename (e.g: shard_00042.parquet -> 42)."""
+    if match := re.search(r"shard_(\d+)\.parquet$", Path(filepath).name):
         return int(match.group(1))
     return None
 
