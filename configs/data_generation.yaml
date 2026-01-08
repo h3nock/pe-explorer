@@ -8,7 +8,9 @@ tasks:
   passkey:
     weight: 0.20
     code_len: [1, 5]
-    depths:
+    # distances: fraction of context where target info is placed
+    # 0.25 = near start (easy), 1.0 = end of training context, >1.0 = beyond training (extrapolation test)
+    distances:
       train: [0.25, 0.5, 0.75, 1.0]
       eval_id: [0.25, 0.5, 0.75, 1.0]
       eval_ood: [1.5, 2.0]
@@ -16,7 +18,8 @@ tasks:
   copy_distance:
     weight: 0.25
     content_len: 5
-    depths:
+    # distances: how far back the content to copy is placed
+    distances:
       train: [0.25, 0.5, 0.75, 1.0]
       eval_id: [0.25, 0.5, 0.75, 1.0]
       eval_ood: [1.5, 2.0]

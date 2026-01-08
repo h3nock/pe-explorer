@@ -162,8 +162,8 @@ def select_length_range(cfg: dict, mode: str) -> list[int]:
         return length_cfg.get("eval_ood", length_cfg.get("train"))
     raise ValueError(f"Unknown mode: {mode}")
 
-def generate_passkey_example(cfg: dict, filler_pool: FillerPool, L: int, context_len: int, depth: float) -> dict:
-    """Generate passkey example. Depth is fraction of usable reference space (L)."""
+def generate_passkey_example(cfg: dict, filler_pool: FillerPool, L: int, context_len: int, distance: float) -> dict:
+    """Generate passkey example. Distance is fraction of usable reference space (L)."""
     code_len = random.randint(cfg["code_len"][0], cfg["code_len"][1])
     code = "".join(random.choice(DIGITS) for _ in range(code_len))
 
@@ -172,7 +172,7 @@ def generate_passkey_example(cfg: dict, filler_pool: FillerPool, L: int, context
     target_ids = _ENC.encode(code)
 
     usable_L_ref = L - len(prompt_ids) - len(target_ids)
-    target_pos = int(depth * usable_L_ref)
+    target_pos = int(distance * usable_L_ref)
     
     # calculate filler needed
     filler_needed = max(1, target_pos - len(prefix_ids))
@@ -198,13 +198,13 @@ def generate_passkey_example(cfg: dict, filler_pool: FillerPool, L: int, context
         "target": code,
         "task": "passkey",
         "code_len": code_len,
-        "depth": depth,
+        "distance": distance,
         "total_tokens": len(full_ids),
     }
 
 
-def generate_copy_distance_example(cfg: dict, content_sampling: dict, filler_pool: FillerPool, L: int, context_len: int, depth: float) -> dict:
-    """Generate copy_distance example. Depth is fraction of usable reference space (L)."""
+def generate_copy_distance_example(cfg: dict, content_sampling: dict, filler_pool: FillerPool, L: int, context_len: int, distance: float) -> dict:
+    """Generate copy_distance example. Distance is fraction of usable reference space (L)."""
     content_type = random.choices(list(content_sampling.keys()), weights=list(content_sampling.values()), k=1)[0]
     pool = DIGITS if content_type == "digit" else LETTERS
     items = [random.choice(pool) for _ in range(cfg["content_len"])]
@@ -215,9 +215,9 @@ def generate_copy_distance_example(cfg: dict, content_sampling: dict, filler_poo
     prompt_ids = _COPY_PROMPT_IDS  # Pre-encoded constant
     target_ids = _ENC.encode(content)
 
-    # Calculate depth relative to L (reference context)
+    # Calculate distance relative to L (reference context)
     usable_L_ref = L - len(prompt_ids) - len(target_ids)
-    target_pos = int(depth * usable_L_ref)
+    target_pos = int(distance * usable_L_ref)
     
     # Calculate filler needed
     filler_needed = max(1, target_pos - len(prefix_ids))
@@ -244,7 +244,7 @@ def generate_copy_distance_example(cfg: dict, content_sampling: dict, filler_poo
         "task": "copy_distance",
         "content_type": content_type,
         "content_len": cfg["content_len"],
-        "depth": depth,
+        "distance": distance,
         "total_tokens": len(full_ids),
     }
 
@@ -342,16 +342,16 @@ def _generate_one(task: str, config: dict, mode: str, overrides: dict | None = N
         if not filler_pool:
             raise ValueError("FillerPool required for passkey generation.")
         mode_key = "eval_id" if mode == "id" else ("eval_ood" if mode == "ood" else "train")
-        depths = cfg.get("depths", {}).get(mode_key, [0.25, 0.5, 0.75, 1.0])
-        depth = overrides["depth"] if "depth" in overrides else random.choice(depths)
-        return generate_passkey_example(cfg, filler_pool, L, context_len, depth)
+        distances = cfg.get("distances", {}).get(mode_key, [0.25, 0.5, 0.75, 1.0])
+        distance = overrides["distance"] if "distance" in overrides else random.choice(distances)
+        return generate_passkey_example(cfg, filler_pool, L, context_len, distance)
     if task == "copy_distance":
         if not filler_pool:
             raise ValueError("FillerPool required for copy_distance generation.")
         mode_key = "eval_id" if mode == "id" else ("eval_ood" if mode == "ood" else "train")
-        depths = cfg.get("depths", {}).get(mode_key, [0.25, 0.5, 0.75, 1.0])
-        depth = overrides["depth"] if "depth" in overrides else random.choice(depths)
-        return generate_copy_distance_example(cfg, content_sampling, filler_pool, L, context_len, depth)
+        distances = cfg.get("distances", {}).get(mode_key, [0.25, 0.5, 0.75, 1.0])
+        distance = overrides["distance"] if "distance" in overrides else random.choice(distances)
+        return generate_copy_distance_example(cfg, content_sampling, filler_pool, L, context_len, distance)
     if task in ("reverse", "sort", "simple_copy", "no_carry_add"):
         return generate_length_task(task, cfg, content_sampling, mode, length_override=overrides.get("length"))
     raise ValueError(f"Unknown task: {task}")
@@ -431,16 +431,16 @@ def generate_eval_dataset(num_per_task: int, config: dict, seed: int) -> list[di
         ood_count = num_per_task - id_count
 
         if task in {"passkey", "copy_distance"}:
-            id_depths = cfg["depths"]["eval_id"]
-            ood_depths = cfg["depths"]["eval_ood"]
-            for depth, count in zip(id_depths, split_counts(id_count, len(id_depths))):
+            id_distances = cfg["distances"]["eval_id"]
+            ood_distances = cfg["distances"]["eval_ood"]
+            for distance, count in zip(id_distances, split_counts(id_count, len(id_distances))):
                 for _ in range(count):
-                    ex = _generate_one(task, config, mode="id", overrides={"depth": depth})
+                    ex = _generate_one(task, config, mode="id", overrides={"distance": distance})
                     ex["split"] = "id"
                     data.append(ex)
-            for depth, count in zip(ood_depths, split_counts(ood_count, len(ood_depths))):
+            for distance, count in zip(ood_distances, split_counts(ood_count, len(ood_distances))):
                 for _ in range(count):
-                    ex = _generate_one(task, config, mode="ood", overrides={"depth": depth})
+                    ex = _generate_one(task, config, mode="ood", overrides={"distance": distance})
                     ex["split"] = "ood"
                     data.append(ex)
             continue
