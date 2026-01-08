@@ -59,6 +59,6 @@ generation:
   output_dir: data/algorithmic
   train_seed: 42
   eval_seed: 123
-  default_train_examples: 1000000  # total synthetic training examples
-  default_eval_per_task: 1000      # eval examples per task (split id/ood)
-  shard_size: 250000               # examples per output parquet file
+  num_train_examples: 1000000  # total synthetic training examples
+  num_eval_per_task: 1000      # eval examples per task (split id/ood)
+  shard_size: 250000           # examples per output parquet file

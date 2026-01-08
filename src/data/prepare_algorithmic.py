@@ -576,14 +576,14 @@ def main():
     filler_parser = subparsers.add_parser("build-filler", help="Build pre-tokenized filler pool")
     filler_parser.add_argument("--fineweb_dir", type=str, default="~/.cache/fineweb-edu")
     filler_parser.add_argument("--output", type=str, default="data/filler_pool.parquet")
-    filler_parser.add_argument("--max_docs", type=int, default=50000)
+    filler_parser.add_argument("-n", "--num_examples", type=int, default=50000, help="Number of docs to include")
     filler_parser.add_argument("--min_tokens", type=int, default=50)
 
     # Generate
     gen_parser = subparsers.add_parser("generate", help="Generate synthetic data")
     gen_parser.add_argument("--config", type=str, default="configs/data_generation.yaml")
     gen_parser.add_argument("--output_dir", type=str, default=None)
-    gen_parser.add_argument("--num_examples", type=int, default=None)
+    gen_parser.add_argument("-n", "--num_examples", type=int, default=None, help="Number of training examples")
     gen_parser.add_argument("--eval_per_task", type=int, default=None)
     gen_parser.add_argument("--num_workers", type=int, default=1)
 
@@ -607,7 +607,7 @@ def main():
             shard_range=shard_range,
             output_path=Path(args.output),
             min_tokens=args.min_tokens,
-            max_docs=args.max_docs,
+            max_docs=args.num_examples,
         )
         return
 
@@ -654,8 +654,8 @@ def main():
             config["filler_pool"] = FillerPool(pool_path)
 
     output_dir = Path(args.output_dir or gen_cfg.get("output_dir") or CACHE_DIR)
-    num_examples = args.num_examples or gen_cfg["default_train_examples"]
-    eval_per_task = args.eval_per_task or gen_cfg["default_eval_per_task"]
+    num_examples = args.num_examples or gen_cfg["num_train_examples"]
+    eval_per_task = args.eval_per_task or gen_cfg["num_eval_per_task"]
     shard_size = gen_cfg.get("shard_size", 250000)
     output_dir.mkdir(parents=True, exist_ok=True)
 
