@@ -83,7 +83,7 @@ evaluation:
     
     # tier 2: algorithmic
     algorithmic:
-      tasks: [addition, sorting, reversal, copy]
+      tasks: [passkey, copy_distance, reverse, sort, no_carry_add, simple_copy]
       max_examples_per_split: 500
       modes: [zero_shot, few_shot]
     
@@ -98,13 +98,18 @@ evaluation:
       samples_per_cell: 20
 
 data:
-  # fineWeb-Edu source 
+  # FineWeb-Edu source 
+  # Partitioning: training and filler shards are DISJOINT to avoid duplicate training
   fineweb:
     repo: "karpathy/fineweb-edu-100b-shuffle"
     total_shards: 1822           # total available (100B tokens)
     download_shards: 911         # our default download (50B tokens, ~89GB)
     tokens_per_shard: 55_000_000 # ~55M tokens per shard
     tokenized_path: "data/fineweb_bin"
+    # Shard partitioning (indices are 0-based, inclusive, DISJOINT)
+    training_shards: [0, 880]      # 881 shards for LM training (~48.4B tokens)
+    validation_shards: [881, 890]  # 10 shards for validation (~550M tokens)
+    filler_shards: [891, 910]      # 20 shards for synthetic filler (~1.1B tokens)
   
   # mixed training 
   mix_ratio:
