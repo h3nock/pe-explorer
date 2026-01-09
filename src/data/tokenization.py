@@ -1,92 +1,119 @@
-"""Tokenization and sharding utilities."""
-import numpy as np
+"""Tokenization and sharding utilities.
+
+Loads a nanochat-trained tiktoken Encoding from a pickle file.
+Special tokens: <|endoftext|> (EOT/EOS), <|bos|> (optional)
+"""
+import pickle
 from pathlib import Path
-from typing import BinaryIO
+
+import numpy as np
 import tiktoken
 
+DEFAULT_TOKENIZER_PATH = Path(__file__).parent.parent.parent / "data" / "tokenizer.pkl"
+
+EOT_TOKEN = "<|endoftext|>"
+BOS_TOKEN = "<|bos|>"
+SPECIAL_TOKENS = {EOT_TOKEN, BOS_TOKEN}
+
+_enc: tiktoken.Encoding | None = None
+
+
+def load_encoding(path: Path | None = None) -> tiktoken.Encoding:
+    """Load and cache tiktoken.Encoding from pickle file."""
+    global _enc
+    if _enc is None:
+        pkl_path = path or DEFAULT_TOKENIZER_PATH
+        with open(pkl_path, "rb") as f:
+            enc = pickle.load(f)
+        if not isinstance(enc, tiktoken.Encoding):
+            raise TypeError(f"Expected tiktoken.Encoding, got {type(enc)}")
+        _enc = enc
+    return _enc
+
+
+def get_eot_token_id(enc: tiktoken.Encoding) -> int | None:
+    """Get EOT token ID, or None if not defined."""
+    try:
+        return enc.encode_single_token(EOT_TOKEN)
+    except KeyError:
+        return None
+
+
+def get_bos_token_id(enc: tiktoken.Encoding) -> int | None:
+    """Get BOS token ID, or None if not defined."""
+    try:
+        return enc.encode_single_token(BOS_TOKEN)
+    except KeyError:
+        return None
+
+
+def get_dtype_str(vocab_size: int) -> str:
+    """Get dtype string based on vocab size ('uint16' or 'uint32')."""
+    return "uint16" if vocab_size <= 65536 else "uint32"
+
+
 class Tokenizer:
-    """Optimized tokenizer wrapper for binary dataset creation.
-    
-    Handles:
-    - Efficient dtype selection (uint16/uint32)
-    - EOT token appending
-    - Fast numpy array conversion
-    """
-    def __init__(self, model_name: str = "gpt2"):
-        self.enc = tiktoken.get_encoding(model_name)
-        self.eot = self.enc.eot_token
-        # Determine smallest sufficient dtype
-        self.dtype = np.uint16 if self.enc.n_vocab <= (np.iinfo(np.uint16).max + 1) else np.uint32
+    """Tokenizer wrapper that encodes text and appends EOT token."""
+
+    def __init__(self, tokenizer_path: Path | None = None):
+        self.enc = load_encoding(tokenizer_path)
+        self.eot = get_eot_token_id(self.enc)
+        if self.eot is None:
+            raise ValueError("Tokenizer missing <|endoftext|> special token")
         self.vocab_size = self.enc.n_vocab
+        self.dtype = np.uint16 if self.vocab_size <= 65536 else np.uint32
 
     def encode(self, text: str | None) -> np.ndarray | None:
-        """Encode text to numpy array with appended EOT token.
-        
-        Returns None if text is None/empty to signal skipping.
-        """
+        """Encode text to numpy array with EOT appended. Returns None if empty."""
         if not text:
             return None
-            
-        tokens = self.enc.encode(text, allowed_special={'<|endoftext|>'})
-        # only append EOT if not already present to avoid double-EOT
+        tokens = self.enc.encode(text, allowed_special=SPECIAL_TOKENS)
         if not tokens or tokens[-1] != self.eot:
             tokens.append(self.eot)
         return np.asarray(tokens, dtype=self.dtype)
 
+
 class ShardWriter:
-    """Writes token arrays to sharded binary files.
-    
-    Args:
-        output_dir: Directory to write shards to
-        file_prefix: Prefix for shard filenames (e.g., "train_w01")
-        shard_size: Maximum tokens per shard
-    """
+    """Writes token arrays to sharded binary files."""
+
     def __init__(self, output_dir: Path, file_prefix: str, shard_size: int):
         self.output_dir = output_dir
         self.file_prefix = file_prefix
         self.shard_size = shard_size
-        
         self.shard_idx = 0
-        self.shard_tokens = 0      # tokens written to current shard
+        self.shard_tokens = 0
         self.shard_paths: list[str] = []
-        self._current_file: BinaryIO | None = None
-        
+        self._file = None
+
     def _open_new_shard(self):
-        """Open a new binary shard file."""
-        if self._current_file:
-            self._current_file.close()
-            
-        fname = f"{self.file_prefix}_{self.shard_idx:04d}.bin"
-        path = self.output_dir / fname
+        if self._file:
+            self._file.close()
+        path = self.output_dir / f"{self.file_prefix}_{self.shard_idx:04d}.bin"
         self.shard_paths.append(str(path))
-        
-        self._current_file = open(path, "wb")
+        self._file = open(path, "wb")
         self.shard_idx += 1
         self.shard_tokens = 0
-        
+
     def write(self, arr: np.ndarray):
         """Write token array to shard(s), splitting at boundaries if needed."""
         pos = 0
         while pos < len(arr):
-            if self._current_file is None:
+            if self._file is None:
                 self._open_new_shard()
-            
+
             space_left = self.shard_size - self.shard_tokens
-            to_write = min(len(arr) - pos, space_left)
-            
-            # write chunk to current file
-            arr[pos : pos + to_write].tofile(self._current_file)
-            
-            self.shard_tokens += to_write
-            pos += to_write
-            
-            # if filled current shard, close it (next write opens new one)
+            chunk_size = min(len(arr) - pos, space_left)
+
+            arr[pos : pos + chunk_size].tofile(self._file)
+            self.shard_tokens += chunk_size
+            pos += chunk_size
+
             if self.shard_tokens >= self.shard_size:
-                self._current_file.close()
-                self._current_file = None
+                self._file.close()
+                self._file = None
 
     def close(self):
         """Close any open file handles."""
-        if self._current_file:
-            self._current_file.close()
-            self._current_file = None
+        if self._file:
+            self._file.close()
+            self._file = None

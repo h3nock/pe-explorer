@@ -17,22 +17,17 @@ from multiprocessing import cpu_count, Manager
 
 import numpy as np
 import pyarrow.parquet as pq
-import tiktoken
 import yaml
 from huggingface_hub import hf_hub_download, list_repo_files
 from tqdm import tqdm
 
-from src.data.tokenization import ShardWriter, Tokenizer
+from src.data.tokenization import ShardWriter, Tokenizer, load_encoding, get_dtype_str
 
 # Config
 CONFIG_PATH = Path(__file__).parent.parent.parent / "configs" / "config.yaml"
 CACHE_DIR = Path.home() / ".cache" / "fineweb-edu"
-TOKENIZER_NAME = "gpt2"
 SHARD_SIZE = 100_000_000  # 100M tokens per output shard (~200MB)
 BUFFER_SIZE = 1_000_000   # 1M token buffer per worker (~2MB)
-
-# vocab info for metadata (GPT-2 = 50257, fits in uint16)
-VOCAB_SIZE = tiktoken.get_encoding(TOKENIZER_NAME).n_vocab
 
 # overridden by configs/config.yaml if specified
 DEFAULT_TRAINING_SHARDS = (0, 880)
@@ -132,7 +127,7 @@ def tokenize_worker(args: tuple) -> dict:
     worker_id, input_shards, output_dir, queue = args
     
     # helper handles tiktoken init and optimized encoding
-    tokenizer = Tokenizer(TOKENIZER_NAME)
+    tokenizer = Tokenizer()
     
     buffer = np.zeros(BUFFER_SIZE, dtype=tokenizer.dtype)
     buf_idx = 0
@@ -278,8 +273,8 @@ def tokenize(num_workers: int = 8, split: str = "train") -> None:
     all_shard_paths = []
     for r in results:
         all_shard_paths.extend(r["shard_paths"])
-    
-    dtype_str = "uint16" if VOCAB_SIZE <= (np.iinfo(np.uint16).max + 1) else "uint32"
+
+    enc = load_encoding()
     meta = {
         "split": split,
         "shard_range": list(shard_range),
@@ -287,8 +282,8 @@ def tokenize(num_workers: int = 8, split: str = "train") -> None:
         "total_docs": total_docs,
         "num_shards": len(all_shard_paths),
         "shard_size": SHARD_SIZE,
-        "dtype": dtype_str,
-        "vocab_size": VOCAB_SIZE,
+        "dtype": get_dtype_str(enc.n_vocab),
+        "vocab_size": enc.n_vocab,
         "shards": sorted([Path(p).name for p in all_shard_paths]),
     }
     with open(output_dir / "meta.json", "w", encoding="utf-8") as f:

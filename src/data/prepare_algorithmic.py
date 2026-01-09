@@ -18,15 +18,15 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
-import tiktoken
 import yaml
 from tqdm import tqdm
 
 from src.data.prepare_fineweb import DEFAULT_FILLER_SHARDS, extract_shard_index
-from src.data.tokenization import ShardWriter, Tokenizer
+from src.data.tokenization import (
+    ShardWriter, Tokenizer, load_encoding, get_eot_token_id, get_dtype_str
+)
 
 
-TOKENIZER_NAME = "gpt2"
 SHARD_SIZE = 100_000_000  # 100M tokens per shard
 BUFFER_SIZE = 1_000_000
 CACHE_DIR = Path.home() / ".cache" / "algorithmic"
@@ -34,10 +34,20 @@ FINEWEB_CACHE_DIR = Path.home() / ".cache" / "fineweb-edu"
 DIGITS = [str(i) for i in range(10)]
 LETTERS = list(string.ascii_lowercase)
 
-# Cached encoder and constant tokens
-_ENC = tiktoken.get_encoding("gpt2")
-_PASSKEY_PROMPT_IDS = _ENC.encode("The code is ")
-_COPY_PROMPT_IDS = _ENC.encode("PASTE: ")
+# Lazy-loaded encoder and constant tokens
+_ENC = None
+_PASSKEY_PROMPT_IDS = None
+_COPY_PROMPT_IDS = None
+
+
+def _get_enc():
+    """Lazy load encoder on first use."""
+    global _ENC, _PASSKEY_PROMPT_IDS, _COPY_PROMPT_IDS
+    if _ENC is None:
+        _ENC = load_encoding()
+        _PASSKEY_PROMPT_IDS = _ENC.encode("The code is ")
+        _COPY_PROMPT_IDS = _ENC.encode("PASTE: ")
+    return _ENC
 
 
 def load_config(config_path: str = "configs/data_generation.yaml") -> dict:
@@ -61,8 +71,9 @@ class FillerPool:
         # sorted indices for bisect
         self.sorted_idx = sorted(range(len(self.token_lens)), key=lambda i: self.token_lens[i])
         self.sorted_lens = [self.token_lens[i] for i in self.sorted_idx]
-        self.enc = tiktoken.get_encoding("gpt2")
-        self.eos = self.enc.eot_token  # 50256 for GPT-2
+        self.eos = get_eot_token_id(_get_enc())
+        if self.eos is None:
+            raise ValueError("Tokenizer missing <|endoftext|> special token")
         print(f"  Loaded filler pool: {len(self.token_ids):,} docs")
 
     def sample(self, target_tokens: int) -> list[int]:
@@ -100,8 +111,6 @@ def build_filler_pool(
     max_docs: int = 50000,
 ) -> None:
     """Build pre-tokenized filler pool from FineWeb shards."""
-    from src.data.prepare_fineweb import extract_shard_index
-
     fineweb_dir = fineweb_dir.expanduser()
     all_paths = sorted(fineweb_dir.rglob("*.parquet"))
     start_idx, end_idx = shard_range
@@ -110,7 +119,7 @@ def build_filler_pool(
     if not paths:
         raise FileNotFoundError(f"No shards in range [{start_idx}, {end_idx}]")
 
-    enc = tiktoken.get_encoding("gpt2")
+    enc = load_encoding()
     token_ids_list, token_lens = [], []
     done = False
 
@@ -167,9 +176,9 @@ def generate_passkey_example(cfg: dict, filler_pool: FillerPool, L: int, context
     code_len = random.randint(cfg["code_len"][0], cfg["code_len"][1])
     code = "".join(random.choice(DIGITS) for _ in range(code_len))
 
-    prefix_ids = _ENC.encode(f"The code is {code}. ")
+    prefix_ids = _get_enc().encode(f"The code is {code}. ")
     prompt_ids = _PASSKEY_PROMPT_IDS 
-    target_ids = _ENC.encode(code)
+    target_ids = _get_enc().encode(code)
 
     usable_L_ref = L - len(prompt_ids) - len(target_ids)
     target_pos = int(distance * usable_L_ref)
@@ -193,8 +202,8 @@ def generate_passkey_example(cfg: dict, filler_pool: FillerPool, L: int, context
     prompt_ids_full.extend(prompt_ids)
 
     return {
-        "text": _ENC.decode(full_ids),
-        "prompt": _ENC.decode(prompt_ids_full),
+        "text": _get_enc().decode(full_ids),
+        "prompt": _get_enc().decode(prompt_ids_full),
         "target": code,
         "task": "passkey",
         "code_len": code_len,
@@ -211,9 +220,9 @@ def generate_copy_distance_example(cfg: dict, content_sampling: dict, filler_poo
     content = " ".join(items)
 
     # Token parts (use cached encoder)
-    prefix_ids = _ENC.encode(f"COPY: {content} ||| ")
+    prefix_ids = _get_enc().encode(f"COPY: {content} ||| ")
     prompt_ids = _COPY_PROMPT_IDS  # Pre-encoded constant
-    target_ids = _ENC.encode(content)
+    target_ids = _get_enc().encode(content)
 
     # Calculate distance relative to L (reference context)
     usable_L_ref = L - len(prompt_ids) - len(target_ids)
@@ -238,8 +247,8 @@ def generate_copy_distance_example(cfg: dict, content_sampling: dict, filler_poo
     prompt_ids_full.extend(prompt_ids)
 
     return {
-        "text": _ENC.decode(full_ids),
-        "prompt": _ENC.decode(prompt_ids_full),
+        "text": _get_enc().decode(full_ids),
+        "prompt": _get_enc().decode(prompt_ids_full),
         "target": content,
         "task": "copy_distance",
         "content_type": content_type,
@@ -464,7 +473,7 @@ def generate_eval_dataset(num_per_task: int, config: dict, seed: int) -> list[di
 def tokenize_worker(args):
     worker_id, input_files, output_dir = args
 
-    tokenizer = Tokenizer(TOKENIZER_NAME)
+    tokenizer = Tokenizer()
 
     buffer = np.zeros(BUFFER_SIZE, dtype=tokenizer.dtype)
     buf_idx = 0
@@ -549,16 +558,14 @@ def tokenize_dataset(parquet_dir: Path | list[Path], output_dir: Path, num_worke
         total_tokens += r["total_tokens"]
         total_docs += r["total_docs"]
 
-    tokenizer = tiktoken.get_encoding(TOKENIZER_NAME)
-    dtype_str = "uint16" if tokenizer.n_vocab <= (np.iinfo(np.uint16).max + 1) else "uint32"
-
+    enc = load_encoding()
     meta = {
         "total_tokens": total_tokens,
         "total_docs": total_docs,
         "num_shards": len(all_shards),
         "shard_size": SHARD_SIZE,
-        "dtype": dtype_str,
-        "vocab_size": tokenizer.n_vocab,
+        "dtype": get_dtype_str(enc.n_vocab),
+        "vocab_size": enc.n_vocab,
         "shards": sorted([Path(p).name for p in all_shards]),
     }
 
