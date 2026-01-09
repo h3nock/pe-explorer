@@ -1,7 +1,6 @@
 """Tokenization and sharding utilities.
 
 Loads a nanochat-trained tiktoken Encoding from a pickle file.
-Special tokens: <|endoftext|> (EOT/EOS), <|bos|> (optional)
 """
 import pickle
 from pathlib import Path
@@ -11,9 +10,19 @@ import tiktoken
 
 DEFAULT_TOKENIZER_PATH = Path(__file__).parent.parent.parent / "data" / "tokenizer.pkl"
 
-EOT_TOKEN = "<|endoftext|>"
-BOS_TOKEN = "<|bos|>"
-SPECIAL_TOKENS = {EOT_TOKEN, BOS_TOKEN}
+SPECIAL_TOKENS = {
+    "<|bos|>",           # document delimiter
+    "<|user_start|>",    # user messages
+    "<|user_end|>",
+    "<|assistant_start|>",  # assistant messages
+    "<|assistant_end|>",
+    "<|python_start|>",  # python REPL tool
+    "<|python_end|>",
+    "<|output_start|>",  # python output
+    "<|output_end|>",
+}
+
+BOS_TOKEN = "<|bos|>"  # default delimiter for pretraining
 
 _enc: tiktoken.Encoding | None = None
 
@@ -31,14 +40,6 @@ def load_encoding(path: Path | None = None) -> tiktoken.Encoding:
     return _enc
 
 
-def get_eot_token_id(enc: tiktoken.Encoding) -> int | None:
-    """Get EOT token ID, or None if not defined."""
-    try:
-        return enc.encode_single_token(EOT_TOKEN)
-    except KeyError:
-        return None
-
-
 def get_bos_token_id(enc: tiktoken.Encoding) -> int | None:
     """Get BOS token ID, or None if not defined."""
     try:
@@ -53,23 +54,44 @@ def get_dtype_str(vocab_size: int) -> str:
 
 
 class Tokenizer:
-    """Tokenizer wrapper that encodes text and appends EOT token."""
+    """Tokenizer wrapper that encodes text and handles special token delimiters."""
 
     def __init__(self, tokenizer_path: Path | None = None):
         self.enc = load_encoding(tokenizer_path)
-        self.eot = get_eot_token_id(self.enc)
-        if self.eot is None:
-            raise ValueError("Tokenizer missing <|endoftext|> special token")
+        self.bos = get_bos_token_id(self.enc)
+        if self.bos is None:
+            raise ValueError(f"Tokenizer missing {BOS_TOKEN} special token")
         self.vocab_size = self.enc.n_vocab
         self.dtype = np.uint16 if self.vocab_size <= 65536 else np.uint32
 
-    def encode(self, text: str | None) -> np.ndarray | None:
-        """Encode text to numpy array with EOT appended. Returns None if empty."""
+    def encode(self, text: str | None, prepend: str | None = BOS_TOKEN, append: str | None = None) -> np.ndarray | None:
+        """Encode text with optional prepend/append of delimiter tokens.
+        
+        Args:
+            text: Text to encode
+            prepend: Special token to prepend (default: BOS_TOKEN).
+            append: Special token to append (default: None).
+        """
         if not text:
             return None
         tokens = self.enc.encode(text, allowed_special=SPECIAL_TOKENS)
-        if not tokens or tokens[-1] != self.eot:
-            tokens.append(self.eot)
+        
+        if prepend:
+            try:
+                pid = self.enc.encode_single_token(prepend)
+                tokens = [pid] + tokens
+            except KeyError:
+                pass
+            
+        if append:
+            try:
+                aid = self.enc.encode_single_token(append)
+                # avoid duplication if text already ends with this token
+                if not tokens or tokens[-1] != aid:
+                    tokens.append(aid)
+            except KeyError:
+                pass
+                
         return np.asarray(tokens, dtype=self.dtype)
 
 

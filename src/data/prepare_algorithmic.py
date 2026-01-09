@@ -23,7 +23,7 @@ from tqdm import tqdm
 
 from src.data.prepare_fineweb import DEFAULT_FILLER_SHARDS, extract_shard_index
 from src.data.tokenization import (
-    ShardWriter, Tokenizer, load_encoding, get_eot_token_id, get_dtype_str
+    ShardWriter, Tokenizer, load_encoding, get_bos_token_id, get_dtype_str
 )
 
 
@@ -71,9 +71,9 @@ class FillerPool:
         # sorted indices for bisect
         self.sorted_idx = sorted(range(len(self.token_lens)), key=lambda i: self.token_lens[i])
         self.sorted_lens = [self.token_lens[i] for i in self.sorted_idx]
-        self.eos = get_eot_token_id(_get_enc())
-        if self.eos is None:
-            raise ValueError("Tokenizer missing <|endoftext|> special token")
+        self.bos = get_bos_token_id(_get_enc())
+        if self.bos is None:
+            raise ValueError("Tokenizer missing <|bos|> special token")
         print(f"  Loaded filler pool: {len(self.token_ids):,} docs")
 
     def sample(self, target_tokens: int) -> list[int]:
@@ -91,12 +91,12 @@ class FillerPool:
             start = random.randint(0, len(tokens) - target_tokens)
             return tokens[start:start + target_tokens]
 
-        # concatenate docs with EOS
+        # concatenate docs with BOS delimiter
         result: list[int] = []
         while len(result) < target_tokens:
             idx = random.randrange(len(self.token_ids))
             result.extend(self.token_ids[idx])
-            result.append(self.eos)
+            result.append(self.bos)
         return result[:target_tokens]
 
     def __len__(self) -> int:
