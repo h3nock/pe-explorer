@@ -12,7 +12,7 @@ tiny:
   n_layers: 6
   n_heads: 8         # 512 / 64 = 8
   d_ff: 2048         # 4 × 512
-  max_seq_len: 2048
+  max_seq_len: 1024
   max_token_budget: 2_800_000_000
   batch_size: 64
   learning_rate: 6.0e-4
@@ -23,7 +23,7 @@ small:
   n_layers: 12
   n_heads: 12        # 768 / 64 = 12
   d_ff: 3072         # 4 × 768
-  max_seq_len: 2048
+  max_seq_len: 1024
   max_token_budget: 6_400_000_000
   batch_size: 32
   learning_rate: 3.0e-4
@@ -34,7 +34,7 @@ medium:
   n_layers: 24
   n_heads: 16        # 1024 / 64 = 16
   d_ff: 4096         # 4 × 1024
-  max_seq_len: 2048
+  max_seq_len: 1024
   max_token_budget: 16_400_000_000
   batch_size: 16
   learning_rate: 2.0e-4
@@ -45,7 +45,7 @@ large:
   n_layers: 16
   n_heads: 32        # 2048 / 64 = 32
   d_ff: 8192         # 4 × 2048
-  max_seq_len: 2048
+  max_seq_len: 1024
   max_token_budget: 40_000_000_000
   batch_size: 8
   learning_rate: 1.0e-4
