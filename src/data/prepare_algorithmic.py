@@ -81,22 +81,24 @@ class FillerPool:
         if target_tokens <= 0:
             return []
 
-        # O(log n) check for single doc
+        # try to find a single doc that is long enough
         pos = bisect.bisect_left(self.sorted_lens, target_tokens)
 
         if pos < len(self.sorted_idx):
-            # Single doc - random span (most coherent)
+            # pick one doc randomly 
             doc_idx = self.sorted_idx[random.randrange(pos, len(self.sorted_idx))]
             tokens = self.token_ids[doc_idx]
-            start = random.randint(0, len(tokens) - target_tokens)
-            return tokens[start:start + target_tokens]
+            return [self.bos] + tokens[:target_tokens - 1]
 
-        # concatenate docs with BOS delimiter
+        # concatenate multiple docs if needed
         result: list[int] = []
         while len(result) < target_tokens:
             idx = random.randrange(len(self.token_ids))
-            result.extend(self.token_ids[idx])
+            doc_tokens = self.token_ids[idx]
+            
             result.append(self.bos)
+            result.extend(doc_tokens)
+            
         return result[:target_tokens]
 
     def __len__(self) -> int:
