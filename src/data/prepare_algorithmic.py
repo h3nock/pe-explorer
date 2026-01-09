@@ -38,6 +38,7 @@ LETTERS = list(string.ascii_lowercase)
 _ENC = None
 _PASSKEY_PROMPT_IDS = None
 _COPY_PROMPT_IDS = None
+_BOS_ID = None
 
 
 def _get_enc():
@@ -48,6 +49,23 @@ def _get_enc():
         _PASSKEY_PROMPT_IDS = _ENC.encode("The code is ")
         _COPY_PROMPT_IDS = _ENC.encode("PASTE: ")
     return _ENC
+
+
+def _get_bos_id():
+    """Cache BOS token id for consistent token-space outputs."""
+    global _BOS_ID
+    if _BOS_ID is None:
+        _BOS_ID = get_bos_token_id(_get_enc())
+    return _BOS_ID
+
+
+def _prepend_bos(token_ids: list[int]) -> list[int]:
+    bos = _get_bos_id()
+    if bos is None:
+        return list(token_ids)
+    if token_ids and token_ids[0] == bos:
+        return list(token_ids)
+    return [bos] + list(token_ids)
 
 
 def load_config(config_path: str = "configs/data_generation.yaml") -> dict:
@@ -88,16 +106,18 @@ class FillerPool:
             # pick one doc randomly 
             doc_idx = self.sorted_idx[random.randrange(pos, len(self.sorted_idx))]
             tokens = self.token_ids[doc_idx]
-            return [self.bos] + tokens[:target_tokens - 1]
+            return tokens[:target_tokens]
 
         # concatenate multiple docs if needed
         result: list[int] = []
+        first_doc = True
         while len(result) < target_tokens:
             idx = random.randrange(len(self.token_ids))
             doc_tokens = self.token_ids[idx]
-            
-            result.append(self.bos)
+            if not first_doc and self.bos is not None:
+                result.append(self.bos)
             result.extend(doc_tokens)
+            first_doc = False
             
         return result[:target_tokens]
 
@@ -211,6 +231,7 @@ def generate_passkey_example(cfg: dict, filler_pool: FillerPool, L: int, context
         "code_len": code_len,
         "distance": distance,
         "total_tokens": len(full_ids),
+        "token_ids": _prepend_bos(full_ids),
     }
 
 
@@ -257,6 +278,7 @@ def generate_copy_distance_example(cfg: dict, content_sampling: dict, filler_poo
         "content_len": cfg["content_len"],
         "distance": distance,
         "total_tokens": len(full_ids),
+        "token_ids": _prepend_bos(full_ids),
     }
 
 
@@ -293,12 +315,14 @@ def generate_length_task(task: str, cfg: dict, content_sampling: dict, mode: str
         a_str = "".join(str(d) for d in a_digits)
         b_str = "".join(str(d) for d in b_digits)
         sum_str = "".join(str(a + b) for a, b in zip(a_digits, b_digits))
+        text = f"add: {a_str}+{b_str}={sum_str}"
         return {
-            "text": f"add: {a_str}+{b_str}={sum_str}",
+            "text": text,
             "prompt": f"add: {a_str}+{b_str}=",
             "target": sum_str,
             "task": "no_carry_add",
             "length": length,
+            "token_ids": _prepend_bos(_get_enc().encode(text)),
         }
 
     # Content-based tasks: reverse, sort, simple_copy
@@ -334,6 +358,7 @@ def generate_length_task(task: str, cfg: dict, content_sampling: dict, mode: str
         "task": task,
         "content_type": content_type,
         "length": length,
+        "token_ids": _prepend_bos(_get_enc().encode(f"{fmt}: {input_text} -> {output_text}")),
     }
 
 def _generate_one(task: str, config: dict, mode: str, overrides: dict | None = None) -> dict:
@@ -493,13 +518,21 @@ def tokenize_worker(args):
 
     for file_path in input_files:
         pf = pq.ParquetFile(file_path)
-        for batch in pf.iter_batches(batch_size=1000, columns=["text"]):
-            for item in batch["text"]:
-                text = item.as_py()
-
-                arr = tokenizer.encode(text)
-                if arr is None:
-                    continue
+        use_token_ids = "token_ids" in pf.schema.names
+        columns = ["token_ids"] if use_token_ids else ["text"]
+        for batch in pf.iter_batches(batch_size=1000, columns=columns):
+            items = batch["token_ids"] if use_token_ids else batch["text"]
+            for item in items:
+                if use_token_ids:
+                    token_list = item.as_py()
+                    if not token_list:
+                        continue
+                    arr = np.asarray(token_list, dtype=tokenizer.dtype)
+                else:
+                    text = item.as_py()
+                    arr = tokenizer.encode(text)
+                    if arr is None:
+                        continue
 
                 doc_len = len(arr)
 
