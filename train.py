@@ -12,7 +12,6 @@ import yaml
 import numpy as np
 import torch
 import torch.multiprocessing as mp
-
 from torch.optim.adamw import AdamW
 
 from src.model.config import ModelConfig
@@ -29,39 +28,58 @@ if mp.get_start_method(allow_none=True) != "spawn":
 def main():
     args = parse_args()
     rank, local_rank, world_size = setup_distributed()
-    config, training_config, eval_config, data_config = load_configs(args.model_size)
-    
+    config, training_config, validation_config, data_config = load_configs(args.model_size)
+
     wsd_stage = args.wsd_stage or training_config.get("wsd_stage", "full")
-    
+
     # training parameters
     batch_size = args.batch_size or config["batch_size"]
     max_token_budget = args.tokens or config["max_token_budget"]
     max_seq_len = config["max_seq_len"]
     seed = args.seed
-    
-    base_checkpoint_dir = args.checkpoint_dir or f"checkpoints/{args.model_size}_{args.pe_type}_s{seed}"
 
-    log_interval = args.log_interval or eval_config.get("log_interval", 10)
+    base_checkpoint_dir = args.checkpoint_dir or f"checkpoints/{args.model_size}_{args.pe_type}_s{seed}"
+    log_interval = args.log_interval or validation_config.get("log_interval", 10)
+    eval_interval = args.eval_interval or validation_config.get("interval", 500)
     group_name = f"{args.model_size}_{args.pe_type}"
-    
+
     # set seeds
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    
+
     model, optimizer = create_model_and_optimizer(config, training_config, args)
+
+    # training dataloader
     dataloader = get_dataloader(
-        seq_len=max_seq_len, 
-        batch_size=batch_size, 
-        token_budget=max_token_budget,
+        mode="train",
         data_config=data_config,
-        rank=rank, 
+        seq_len=max_seq_len,
+        batch_size=batch_size,
+        token_budget=max_token_budget,
+        rank=rank,
         world_size=world_size,
         seed=seed,
     )
-    
+
+    # validation dataloader
+    val_token_budget = validation_config.get("token_budget")
+    val_dataloader = get_dataloader(
+        mode="val",
+        data_config=data_config,
+        seq_len=max_seq_len,
+        batch_size=batch_size,
+        token_budget=val_token_budget,
+        rank=rank,
+        world_size=world_size,
+        seed=seed,
+        num_workers=2,
+    )
+    if rank == 0:
+        print(f"Validation: {len(val_dataloader)} batches ({val_token_budget:,} tokens)")
+
     effective_batch_size = batch_size * world_size * args.grad_accum_steps
     tokens_per_step = effective_batch_size * max_seq_len
     
@@ -85,7 +103,7 @@ def main():
         "tokenizer_name": "gpt2",
         "size_config": config,
         "training_config": training_config,
-        "eval_config": eval_config,
+        "validation_config": validation_config,
         "data_config": data_config,
         "cli_args": vars(args),
     }
@@ -117,11 +135,12 @@ def main():
         # re-create dataloader with correct offset if needed
         if samples_seen > 0:
             dataloader = get_dataloader(
-                seq_len=max_seq_len, 
-                batch_size=batch_size, 
-                token_budget=max_token_budget,
+                mode="train",
                 data_config=data_config,
-                rank=rank, 
+                seq_len=max_seq_len,
+                batch_size=batch_size,
+                token_budget=max_token_budget,
+                rank=rank,
                 world_size=world_size,
                 samples_seen=samples_seen,
                 seed=seed,
@@ -129,14 +148,14 @@ def main():
     
     # WSD stage specific configuration
     if wsd_stage == "full":
-        run_full_stage(trainer, dataloader, config, training_config, tokens_per_step, max_token_budget, base_config, group_name, rank, log_interval)
+        run_full_stage(trainer, dataloader, val_dataloader, eval_interval, config, training_config, tokens_per_step, max_token_budget, base_config, group_name, rank, log_interval)
     elif wsd_stage == "decay_only":
-        run_decay_stage(trainer, dataloader, checkpoint, args, tokens_per_step, base_config, group_name, rank, log_interval)
+        run_decay_stage(trainer, dataloader, val_dataloader, eval_interval, checkpoint, args, tokens_per_step, base_config, group_name, rank, log_interval)
     
     cleanup_distributed()
 
 
-def run_full_stage(trainer, dataloader, config, training_config, tokens_per_step, max_token_budget, base_config, group_name, rank, log_interval):
+def run_full_stage(trainer, dataloader, val_dataloader, eval_interval, config, training_config, tokens_per_step, max_token_budget, base_config, group_name, rank, log_interval):
     """Multi-budget training with branch checkpoints."""
     target_budgets = config.get("target_budgets", [max_token_budget])
     target_budgets = sorted(set(int(b) for b in target_budgets))
@@ -153,11 +172,11 @@ def run_full_stage(trainer, dataloader, config, training_config, tokens_per_step
         trainer.configure_wsd("full", trainer.max_steps, trainer.decay_steps or decay_steps, target_checkpoints)
     
     trainer.init_wandb(base_config, group_name, max_token_budget)
-    trainer.train(dataloader, log_interval=log_interval)
+    trainer.train(dataloader, val_dataloader=val_dataloader, log_interval=log_interval, eval_interval=eval_interval)
     trainer.finish_wandb()
 
 
-def run_decay_stage(trainer, dataloader, checkpoint, args, tokens_per_step, base_config, group_name, rank, log_interval):
+def run_decay_stage(trainer, dataloader, val_dataloader, eval_interval, checkpoint, args, tokens_per_step, base_config, group_name, rank, log_interval):
     """Decay-only training from branch checkpoint."""
     if not args.resume:
         raise ValueError("decay_only requires --resume")
@@ -197,8 +216,8 @@ def run_decay_stage(trainer, dataloader, checkpoint, args, tokens_per_step, base
     trainer.init_wandb(base_config, group_name, trainer.target_budget)
     if rank == 0:
         print(f"WSD decay: {decay_steps} steps (from {trainer.step} to {max_steps})")
-    
-    trainer.train(dataloader, log_interval=log_interval)
+
+    trainer.train(dataloader, val_dataloader=val_dataloader, log_interval=log_interval, eval_interval=eval_interval)
     trainer.finish_wandb()
 
 
@@ -213,6 +232,7 @@ def parse_args():
     parser.add_argument("--checkpoint-dir", type=str, default=None, help="Custom checkpoint directory")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     parser.add_argument("--log-interval", type=int, default=None, help="Override log interval")
+    parser.add_argument("--eval-interval", type=int, default=None, help="Override eval interval")
     parser.add_argument("--wsd-stage", type=str, default=None, choices=["decay_only", "full"], help="WSD stage")
     parser.add_argument("--decay-tokens", type=int, default=None, help="Decay phase tokens (required for decay_only)")
     return parser.parse_args()
@@ -221,7 +241,12 @@ def parse_args():
 def load_configs(model_size):
     with open("configs/config.yaml") as f:
         all_configs = yaml.safe_load(f)
-    return all_configs[model_size], all_configs["training"], all_configs.get("evaluation", {}), all_configs.get("data", {})
+    return (
+        all_configs[model_size],
+        all_configs["training"],
+        all_configs.get("validation", {}),
+        all_configs.get("data", {}),
+    )
 
 
 def create_model_and_optimizer(config, training_config, args):

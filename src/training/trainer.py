@@ -74,14 +74,13 @@ class Trainer:
         # training state (will be restored from checkpoint or defaults)
         self.step = 0
         self.micro_step = 0
-        self.step = 0
-        self.micro_step = 0
         self.consumed_tokens = 0
         self.run_id = None  # single run ID for wandb
         self.samples_seen = 0 # Global samples seen (for deterministic resume)
         self.target_budget = None  # set from branch checkpoint for decay
         self.branch_tokens = None  # branch point for decay
         self.next_target_idx = 0
+        self.best_val_loss = float('inf')  # track best validation loss
 
         # WSD state (set by configure_wsd after checkpoint load)
         self.wsd_stage = None
@@ -264,9 +263,10 @@ class Trainer:
             # progress tracking
             'next_target_idx': self.next_target_idx,
             'wandb_run_id': self.run_id,
-            
+
             # resume state (deterministic offset)
             'samples_seen': self.samples_seen,
+            'best_val_loss': self.best_val_loss,
         }
         
         model_obj = self.model.module if hasattr(self.model, "module") else self.model
@@ -342,7 +342,8 @@ class Trainer:
             self.run_id = None
             
         self.samples_seen = checkpoint.get('samples_seen', 0)
-        
+        self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+
         if self.scaler is not None and 'scaler_state_dict' in checkpoint:
             self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
         
@@ -401,7 +402,36 @@ class Trainer:
         
         return loss.item() * self.grad_accum_steps, grad_norm, weight_norm, did_step
     
-    def train(self, dataloader, log_interval: int = 100, max_tokens: int | None = None):
+    @torch.no_grad()
+    def validate(self, dataloader) -> float:
+        """Run validation and return average loss."""
+        if self.world_size > 1:
+            dist.barrier()
+
+        self.model.eval()
+        total_loss = 0.0
+        total_tokens = 0
+
+        for x, y in dataloader:
+            x, y = x.to(self.device), y.to(self.device)
+            with autocast("cuda", dtype=self.dtype, enabled=self.device.type == "cuda"):
+                logits = self.model(x)
+                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+
+            batch_tokens = x.numel()
+            total_loss += loss.item() * batch_tokens
+            total_tokens += batch_tokens
+
+        # aggregate across ranks
+        if self.world_size > 1:
+            stats = torch.tensor([total_loss, total_tokens], device=self.device)
+            dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+            total_loss, total_tokens = stats[0].item(), int(stats[1].item())
+
+        self.model.train()
+        return total_loss / total_tokens if total_tokens > 0 else 0.0
+
+    def train(self, dataloader, val_dataloader=None, eval_interval: int = 500, log_interval: int = 100, max_tokens: int | None = None):
         """Train the model using self.max_steps set by configure_wsd().
         
         Args:
@@ -473,6 +503,28 @@ class Trainer:
                     tokens_since_log = 0
                     start_time = time.time()
                 
+                # validation
+                if val_dataloader and self.step % eval_interval == 0 and self.step > 0:
+                    val_loss = self.validate(val_dataloader)
+                    val_ppl = np.exp(val_loss)
+
+                    # track best model
+                    is_best = val_loss < self.best_val_loss
+                    if is_best:
+                        self.best_val_loss = val_loss
+                        os.makedirs(self.checkpoint_dir, exist_ok=True)
+                        self.save_checkpoint(f"{self.checkpoint_dir}/best.pt", dataloader)
+
+                    if self.rank == 0:
+                        best_marker = " (best)" if is_best else ""
+                        print(f"VALIDATION (step {self.step}): Loss={val_loss:.4f}, PPL={val_ppl:.2f}{best_marker}")
+                        metrics = {
+                            "val/loss": val_loss,
+                            "val/ppl": val_ppl,
+                            "val/best_loss": self.best_val_loss,
+                        }
+                        self.log_wandb(metrics, self.consumed_tokens)
+
                 # checkpoint
                 if self.step % self.checkpoint_interval == 0 and self.step > 0:
                     os.makedirs(self.checkpoint_dir, exist_ok=True)

@@ -65,36 +65,31 @@ training:
   vocab_size: 65536 
   dropout: 0.0 
 
-evaluation:
-  # training-time eval 
-  eval_interval: 500
-  eval_tokens: 1_000_000
-  log_interval: 10
+# online validation (during training)
+validation:
+  interval: 500           # validate every N steps
+  token_budget: 1_000_000 # tokens to validate on
+  log_interval: 10        # log training metrics every N steps
   checkpoint_interval: 5000
-  
-  # post-training eval settings
-  post_training:
-    # tier 1: perplexity
-    ppl:
-      datasets: [wikitext103, pg19]
-      context_lengths: [512, 1024, 2048, 4096, 8192]  # includes extrapolation
-      max_tokens: 1_000_000
-    
-    # tier 2: algorithmic
-    algorithmic:
-      tasks: [passkey, copy_distance, reverse, sort, no_carry_add, simple_copy]
-      max_examples_per_split: 500
-      modes: [zero_shot, few_shot]
-    
-    # tier 3: position-dependent retrieval
-    passkey:
-      context_lengths: [512, 1024, 2048, 4096, 8192]
-      samples_per_context: 100
-      positions: [beginning, middle, end]
-    niah:  # needle-in-a-haystack sweep
-      context_lengths: [512, 1024, 2048, 4096, 8192]
-      position_percentages: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-      samples_per_cell: 20
+
+# offline evaluation (post-training)
+evaluation:
+  ppl:
+    datasets: [wikitext103, pg19]
+    context_lengths: [512, 1024, 2048, 4096, 8192]
+    max_tokens: 1_000_000
+  algorithmic:
+    tasks: [passkey, copy_distance, reverse, sort, no_carry_add, simple_copy]
+    max_examples_per_split: 500
+    modes: [zero_shot, few_shot]
+  passkey:
+    context_lengths: [512, 1024, 2048, 4096, 8192]
+    samples_per_context: 100
+    positions: [beginning, middle, end]
+  niah:
+    context_lengths: [512, 1024, 2048, 4096, 8192]
+    position_percentages: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    samples_per_cell: 20
 
 data:
   # FineWeb-Edu source 
