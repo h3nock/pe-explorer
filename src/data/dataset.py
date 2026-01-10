@@ -106,6 +106,7 @@ class MemmapDataset(Dataset):
         data_dir: str | Path | None = None,
         seq_len: int = 2048,
         token_budget: int | None = None,
+        shards: list[int] | None = None,
     ):
         if data_dir is None:
             # fallback to default cache if not provided
@@ -130,10 +131,16 @@ class MemmapDataset(Dataset):
         dtype_str = self.meta.get("dtype", "uint16")
         self.dtype = np.uint16 if dtype_str == "uint16" else np.uint32
         
-        # Resolve shard paths relative to meta.json directory
-        # Supports both legacy absolute paths (by taking .name) and new relative paths
-        shard_paths = [self.data_dir / Path(p).name for p in self.meta["shards"]]
-        
+        # Resolve shard paths (supports legacy absolute paths by taking .name)
+        all_shard_paths = [self.data_dir / Path(p).name for p in self.meta["shards"]]
+
+        if shards is not None:
+            if any(idx < 0 or idx >= len(all_shard_paths) for idx in shards):
+                raise ValueError(f"Shard index out of range (total {len(all_shard_paths)})")
+            shard_paths = [all_shard_paths[i] for i in shards]
+        else:
+            shard_paths = all_shard_paths
+
         # Check ulimit against shard count
         soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
         if len(shard_paths) > soft_limit - 100:  # buffer for other files
@@ -221,11 +228,18 @@ class InterleavedDataset(Dataset):
         local_idx = cycle_idx * self.weights[dataset_idx] + local_offset
         return self.datasets[dataset_idx][local_idx]
 
+def _expand_shard_range(shard_range: list[int] | None) -> list[int] | None:
+    """Convert [start, end] to [start, start+1, ..., end]."""
+    if shard_range is None:
+        return None
+    return list(range(shard_range[0], shard_range[1] + 1))
+
+
 def get_dataloader(
+    mode: str,
+    data_config: dict,
     seq_len: int,
     batch_size: int,
-    data_dir: str | Path | None = None,
-    data_config: dict | None = None,
     token_budget: int | None = None,
     rank: int = 0,
     world_size: int = 1,
@@ -233,72 +247,59 @@ def get_dataloader(
     seed: int = 42,
     num_workers: int = 4,
 ) -> DataLoader:
-    """Create DataLoader for sharded pre-tokenized data.
-    
-    Supports:
-    1. Single dataset (via data_dir)
-    2. Mixed dataset (via data_config with 'mix_ratio')
+    """Create DataLoader for training or validation.
+
+    Args:
+        mode: "train" or "val"
+        data_config: Data section from config.yaml
+        token_budget: Max tokens to use (limits dataset size)
     """
-    if data_config and "mix_ratio" in data_config:
-        # mixed dataset mode
-        ratio = data_config["mix_ratio"] # e.g. {"fineweb": 0.9, "algorithmic": 0.1}
-        
-        # we need integer weights for deterministic interleaving.
-        # and use a large multiplier to handle small percentages (e.g. 0.5% = 0.005)
-        multiplier = 1000
-        
-        keys = list(ratio.keys())
-        
-        final_weights = {}
-        processed_datasets = []
-        
-        for k in keys:
-            w = int(ratio[k] * multiplier)
-            if w == 0 and ratio[k] > 0:
-                raise ValueError(f"Ratio {ratio[k]} for {k} is too small for multiplier {multiplier}.")
-            final_weights[k] = w
-            
-            sub_cfg = data_config.get(k, {}) if data_config else {}
-            path_str = sub_cfg.get("tokenized_path")
-            
-            if path_str:
-                d_dir = Path(path_str).expanduser()
-            elif k == "fineweb":
-                d_dir = DEFAULT_TOKENIZED_DIR
-            else:
-                raise ValueError(f"Missing 'tokenized_path' for dataset '{k}' in config.")
+    fineweb_cfg = data_config.get("fineweb", {})
+    fineweb_path = fineweb_cfg.get("tokenized_path", DEFAULT_TOKENIZED_DIR)
 
-            if not d_dir.exists():
-                raise FileNotFoundError(f"Dataset directory not found for '{k}': {d_dir}")
+    if mode == "train":
+        # use training_shards, optionally mix with other sources
+        train_shards = _expand_shard_range(fineweb_cfg.get("training_shards"))
 
-            ds = MemmapDataset(data_dir=d_dir, seq_len=seq_len, token_budget=None)
-            processed_datasets.append(ds)
-            
-        # create interleaved
-        weights = [final_weights[k] for k in keys]
-        dataset = InterleavedDataset(processed_datasets, weights)
-        
-        if token_budget:
-            budget_samples = token_budget // seq_len
-            if len(dataset) < budget_samples:
-                raise ValueError(
-                    f"Requested {budget_samples:,} samples ({token_budget} tokens) "
-                    f"but interleaved dataset only has {len(dataset):,} samples. "
-                )
-            
-            # enforce budget exact match (truncate)
-            if len(dataset) > budget_samples:
-                dataset = torch.utils.data.Subset(dataset, range(budget_samples))
+        if "mix_ratio" in data_config:
+            # blend multiple sources
+            ratio = data_config["mix_ratio"]
+            multiplier = 1000
 
+            datasets, weights = [], []
+            for key, pct in ratio.items():
+                w = int(pct * multiplier)
+                if w == 0 and pct > 0:
+                    raise ValueError(f"Ratio {pct} for {key} too small")
+                weights.append(w)
+
+                if key == "fineweb":
+                    ds = MemmapDataset(fineweb_path, seq_len=seq_len, shards=train_shards)
+                else:
+                    path = data_config.get(key, {}).get("tokenized_path")
+                    if not path:
+                        raise ValueError(f"Missing 'tokenized_path' for '{key}'")
+                    ds = MemmapDataset(path, seq_len=seq_len)
+                datasets.append(ds)
+
+            dataset = InterleavedDataset(datasets, weights)
+
+            if token_budget:
+                budget_samples = token_budget // seq_len
+                if len(dataset) > budget_samples:
+                    dataset = torch.utils.data.Subset(dataset, range(budget_samples))
+        else:
+            # single source training
+            dataset = MemmapDataset(
+                fineweb_path, seq_len=seq_len, token_budget=token_budget, shards=train_shards
+            )
     else:
-        # fallback to single dataset
+        # use validation_shards from fineweb only
+        val_shards = _expand_shard_range(fineweb_cfg.get("validation_shards"))
         dataset = MemmapDataset(
-            data_dir=data_dir,
-            seq_len=seq_len,
-            token_budget=token_budget,
+            fineweb_path, seq_len=seq_len, token_budget=token_budget, shards=val_shards
         )
-    
-    # Sampler handles global -> rank splitting and resume offset
+
     sampler = DeterministicSampler(
         total_samples=len(dataset),
         rank=rank,
@@ -306,7 +307,7 @@ def get_dataloader(
         samples_seen=samples_seen,
         seed=seed,
     )
-    
+
     return DataLoader(
         dataset,
         batch_size=batch_size,
