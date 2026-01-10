@@ -2,25 +2,29 @@ import torch
 import torch.nn as nn
 import math 
 from typing import Optional, Callable
+from src.model.rmsnorm import RMSNorm
 
 class MultiHeadAttention(nn.Module):
-    """Multi-head attention module"""
-    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1):
+    """Multi-head attention module with QK-Norm for training stability."""
+
+    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.0):
         super().__init__()
         assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
-        
         self.d_model = d_model
         self.n_heads = n_heads
         self.d_head = d_model // n_heads
         self.scale = math.sqrt(self.d_head)
-        
-        # query, key, value projections
-        self.q_proj = nn.Linear(d_model, d_model)
-        self.k_proj = nn.Linear(d_model, d_model)
-        self.v_proj = nn.Linear(d_model, d_model)
+        # query, key, value projections (no bias, following LLaMA)
+        self.q_proj = nn.Linear(d_model, d_model, bias=False)
+        self.k_proj = nn.Linear(d_model, d_model, bias=False)
+        self.v_proj = nn.Linear(d_model, d_model, bias=False)
 
-        # output projection 
-        self.out_proj = nn.Linear(d_model, d_model)
+        # to normalize Q and K to prevent attention logit explosion
+        self.q_norm = RMSNorm(self.d_head)
+        self.k_norm = RMSNorm(self.d_head)
+
+        # output projection
+        self.out_proj = nn.Linear(d_model, d_model, bias=False)
         self.dropout = nn.Dropout(dropout)
     
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None, rope_fn: Optional[Callable] = None) -> torch.Tensor:
@@ -50,6 +54,10 @@ class MultiHeadAttention(nn.Module):
         # apply rotary position embeddings if provided
         if rope_fn is not None:
             q, k = rope_fn(q, k)
+
+        # QK-norm
+        q = self.q_norm(q)
+        k = self.k_norm(k)
         
         # uses FlashAttention on A100/H100, falls back to math on older GPUs 
         out = torch.nn.functional.scaled_dot_product_attention(
@@ -59,9 +67,3 @@ class MultiHeadAttention(nn.Module):
         )
         out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
         return self.out_proj(out)
-
-
-
-        
-        
-        

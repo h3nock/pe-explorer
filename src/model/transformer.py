@@ -5,6 +5,7 @@ from typing import Optional
 
 from src.model.config import ModelConfig
 from src.model.block import TransformerBlock
+from src.model.rmsnorm import RMSNorm
 from src.encodings import get_pe
 
 class Transformer(nn.Module):
@@ -32,11 +33,11 @@ class Transformer(nn.Module):
             for _ in range(config.n_layers)
         ])
 
-        # final layer norm 
-        self.norm = nn.LayerNorm(config.d_model) 
+        # final RMSNorm
+        self.norm = RMSNorm(config.d_model)
 
-        # lm head (ouput projection) 
-        self.lm_head = nn.Linear(config.d_model, config.vocab_size)
+        # lm head (output projection)
+        self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
         # weight tying
         if config.tie_embedding: 

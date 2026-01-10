@@ -77,12 +77,12 @@ Parameter counts depend on weight tying configuration (`tie_embedding` in config
 
 | Name | Params (tied) | Params (untied) | d_model | n_layers | n_heads | Training Budget (20N) |
 |------|---------------|-----------------|---------|----------|---------|----------------------|
-| tiny | ~45M | ~70M | 512 | 6 | 8 | 1.4B |
-| small | ~124M | ~162M | 768 | 12 | 12 | 3.2B |
-| medium | ~354M | ~405M | 1024 | 24 | 16 | 8.2B |
-| large | ~908M | ~1.01B | 2048 | 16 | 32 | 20B |
+| tiny | ~59M | ~92M | 512 | 6 | 8 | 1.2B |
+| small | ~164M | ~214M | 768 | 12 | 12 | 3.3B |
+| medium | ~470M | ~537M | 1024 | 24 | 16 | 9.4B |
+| large | ~1.21B | ~1.34B | 2048 | 16 | 32 | 24.2B |
 
-> **Note**: Weight tying shares the token embedding matrix with the LM head, reducing parameters by `vocab_size × d_model` (~25-100M depending on model size).
+> **Note**: Weight tying shares the token embedding matrix with the LM head, reducing parameters by `vocab_size × d_model` (~33-134M depending on model size).
 
 ## References
 
