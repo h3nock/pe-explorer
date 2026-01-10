@@ -63,7 +63,7 @@ training:
   decay_tokens: null  # auto-calculated (10%) if null
   grad_clip: 1.0
   dtype: bfloat16
-  vocab_size: 50257 
+  vocab_size: 65536 
   dropout: 0.0 
 
 evaluation:
