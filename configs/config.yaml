@@ -57,13 +57,16 @@ training:
   weight_decay: 0.1
   beta1: 0.9
   beta2: 0.95
-  warmup_steps: 2000 
+  warmup_steps: 2000
   wsd_stage: full     # Options: 'full' (warmup + stable + 10% auto-decay), 'decay_only' (resume & 10% decay)
   decay_tokens: null  # auto-calculated (10%) if null
   grad_clip: 1.0
   dtype: bfloat16
-  vocab_size: 65536 
-  dropout: 0.0 
+  vocab_size: 65536
+  dropout: 0.0
+  tie_embedding: true  # tie input/output embeddings (reduces params)
+  
+  pe_params: {}        # PE-specific params (e.g., {theta: 10000} for RoPE)
 
 # online validation (during training)
 validation:
