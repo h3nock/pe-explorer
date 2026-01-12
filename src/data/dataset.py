@@ -7,11 +7,25 @@ from pathlib import Path
 import os
 import resource
 import bisect
+import random
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 
+
+def worker_init_fn(worker_id: int) -> None:
+    """Deterministic seeding for DataLoader workers.
+
+    Uses the main process's torch seed (set via Generator) to derive
+    reproducible seeds for each worker's RNG state.
+    """
+    # get base seed from PyTorch (set by DataLoader's generator)
+    worker_seed = torch.initial_seed() % 2**32
+
+    # seed all RNGs with worker-specific value
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 DEFAULT_TOKENIZED_DIR = Path("data") / "fineweb_bin"
 
@@ -48,45 +62,27 @@ class ShardDataset(Dataset):
 
 class DeterministicSampler(Dataset):
     """Sampler that yields indices deterministically with offset resume support.
-    
-    Assigns indices to ranks using a strided pattern (0, 0+W, 0+2W, ...) or contiguous.
+
+    Assigns indices to ranks using a strided pattern (0, 0+W, 0+2W, ...).
     Resume is handled by skipping the first `samples_seen` samples globally.
-    O(1) memory usage via streaming iterator.
     """
-    def __init__(self, total_samples: int, rank: int, world_size: int, 
-                 samples_seen: int = 0, shuffle: bool = False, seed: int = 42):
+    def __init__(self, total_samples: int, rank: int, world_size: int, samples_seen: int = 0):
         self.total_samples = total_samples
         self.rank = rank
         self.world_size = world_size
         self.samples_seen = samples_seen
-        self.shuffle = shuffle
-        if self.shuffle:
-            # For large datasets, shuffling requires careful O(N) index mapping.
-            # For now, we enforce canonical order for determinism and O(1) streaming.
-            raise NotImplementedError("Streaming shuffle not implemented. Use shuffle=False.")
-        self.seed = seed
-        
+
     def __iter__(self):
-        # Calculate start offset for this rank
-        # We want the first index `i >= samples_seen` where `i % world_size == rank`
-        
-        # 1. Align samples_seen to the next sample belonging to this rank
+        # align samples_seen to the next sample belonging to this rank
         remaining_offset = (self.rank - self.samples_seen) % self.world_size
         start_index = self.samples_seen + remaining_offset
-        
-        # 2. Yield indices with stride = world_size
-        # 2. Yield indices with stride = world_size
+
         if start_index < self.total_samples:
             yield from range(start_index, self.total_samples, self.world_size)
 
     def __len__(self):
-        # Remaining global samples after resume
-        remaining = max(0, self.total_samples - self.samples_seen)
-        # Exact length of range(start, stop, step) logic
-        # First sample for this rank:
         offset = (self.rank - self.samples_seen) % self.world_size
         start = self.samples_seen + offset
-        
         if start >= self.total_samples:
             return 0
         return (self.total_samples - start + self.world_size - 1) // self.world_size
@@ -127,11 +123,11 @@ class MemmapDataset(Dataset):
         with open(meta_path, encoding="utf-8") as f:
             self.meta = json.load(f)
         
-        # Get dtype from metadata (Llama 3 uses uint32 for 128k vocab)
+        # get dtype from metadata 
         dtype_str = self.meta.get("dtype", "uint16")
         self.dtype = np.uint16 if dtype_str == "uint16" else np.uint32
         
-        # Resolve shard paths (supports legacy absolute paths by taking .name)
+        # resolve shard paths (extract filename to support absolute paths) 
         all_shard_paths = [self.data_dir / Path(p).name for p in self.meta["shards"]]
 
         if shards is not None:
@@ -153,8 +149,7 @@ class MemmapDataset(Dataset):
         # Calculate total samples
         self.total_samples = sum(len(d) for d in self.datasets)
         
-        # apply token budget (global limit)
-        # note: token_budget is "training tokens" (input tokens).
+        # cap dataset size to token budget for training tokens
         # we store (seq_len + 1) per sample, but model sees seq_len tokens.
         if token_budget:
             budget_samples = token_budget // seq_len
@@ -305,8 +300,11 @@ def get_dataloader(
         rank=rank,
         world_size=world_size,
         samples_seen=samples_seen,
-        seed=seed,
     )
+
+    # create generator with fixed seed for deterministic worker spawning
+    generator = torch.Generator()
+    generator.manual_seed(seed)
 
     return DataLoader(
         dataset,
@@ -315,4 +313,6 @@ def get_dataloader(
         num_workers=num_workers,
         pin_memory=True,
         drop_last=True,
+        worker_init_fn=worker_init_fn,
+        generator=generator,
     )
