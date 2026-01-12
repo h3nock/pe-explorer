@@ -3,6 +3,9 @@
 ## Quick Start
 
 ```bash
+# 0. Make the sweep wrapper executable (one-time setup)
+chmod +x scripts/run_sweep.sh
+
 # 1. Create sweep and save the id inside sweep.log
 wandb sweep sweeps/tiny_hyperparams.yaml | tee sweep.log
 

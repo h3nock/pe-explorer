@@ -1,4 +1,8 @@
 program: ./scripts/run_sweep.sh
+command:
+  - bash
+  - ${program}
+  - ${args}
 project: pe-explorer
 method: bayes
 metric:
