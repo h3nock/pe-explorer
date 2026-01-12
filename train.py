@@ -168,7 +168,7 @@ def main():
         'pe_type': args.pe_type,
         'pe_params': training_config.get('pe_params', {}),
         'tie_embedding': training_config.get('tie_embedding', True),
-        'dropout': training_config.get('dropout', 0.0),
+        'dropout': args.dropout if args.dropout is not None else training_config.get('dropout', 0.0),
     }
 
     # determine run name (explicit, from checkpoint dir, or auto-generated)
@@ -225,7 +225,7 @@ def main():
     
     # dynamic warmup: min(config value, 3% of total steps)
     max_train_steps = max_token_budget // tokens_per_step
-    warmup_steps = min(training_config.get("warmup_steps", 2000), int(0.03 * max_train_steps))
+    warmup_steps = args.warmup_steps if args.warmup_steps is not None else min(training_config.get("warmup_steps", 2000), int(0.03 * max_train_steps))
     
     # base config for wandb
     base_config = {
@@ -272,7 +272,7 @@ def main():
         batch_size=batch_size,
         max_seq_len=max_seq_len,
         grad_accum_steps=args.grad_accum_steps,
-        grad_clip=training_config["grad_clip"],
+        grad_clip=args.grad_clip if args.grad_clip is not None else training_config["grad_clip"],
         warmup_steps=warmup_steps,
         checkpoint_interval=max(max_token_budget // tokens_per_step // 20, 25),
         checkpoint_dir=base_checkpoint_dir,
@@ -391,6 +391,10 @@ def parse_args():
     parser.add_argument("--wsd-stage", type=str, default=None, choices=["decay_only", "full"], help="WSD stage")
     parser.add_argument("--decay-tokens", type=int, default=None, help="Decay phase tokens (required for decay_only)")
     parser.add_argument("--run-name", type=str, default=None, help="Override auto-generated run name (skips auto-versioning)")
+    parser.add_argument("--lr", type=float, default=None, help="Override learning rate from config")
+    parser.add_argument("--warmup-steps", type=int, default=None, help="Override warmup steps from config")
+    parser.add_argument("--dropout", type=float, default=None, help="Override dropout from config")
+    parser.add_argument("--grad-clip", type=float, default=None, help="Override gradient clipping from config")
     return parser.parse_args()
 
 
@@ -415,13 +419,14 @@ def create_model_and_optimizer(config, training_config, args):
         vocab_size=training_config["vocab_size"],
         pe_type=args.pe_type,
         pe_params=training_config.get("pe_params", {}),
-        dropout=training_config.get("dropout", 0.0),
+        dropout=args.dropout if args.dropout is not None else training_config.get("dropout", 0.0),
         tie_embedding=training_config.get("tie_embedding", True),
     )
     model = Transformer(model_config)
+    lr = args.lr if args.lr is not None else config["learning_rate"]
     optimizer = AdamW(
         model.parameters(),
-        lr=config["learning_rate"],
+        lr=lr,
         weight_decay=training_config["weight_decay"],
         betas=(training_config["beta1"], training_config["beta2"])
     )
