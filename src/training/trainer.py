@@ -3,16 +3,15 @@ import time
 import random
 import pickle
 from dataclasses import asdict, is_dataclass
-import torch
-import wandb
+
 import numpy as np
+import torch
 import torch.nn as nn
-from torch.optim import AdamW
 import torch.nn.functional as F
 import torch.distributed as dist
-from torch.amp import autocast 
+import wandb
+from torch.amp import autocast
 from torch.cuda.amp import GradScaler
-from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 
@@ -139,22 +138,34 @@ class Trainer:
         if stage == "decay_only" and self.decay_start_step is None:
             self.decay_start_step = self.step
     
-    def init_wandb(self, base_config: dict, group: str, target_budget: int):
-        """Initialize wandb run. target_budget is the budget this run is named for."""
+    def init_wandb(self, base_config: dict, group: str, target_budget: int, run_name: str | None = None):
+        """Initialize wandb run with run ID persistence and custom metric axes.
+
+        Args:
+            base_config: Config dict for wandb
+            group: Wandb group name (e.g., "tiny_rope")
+            target_budget: Token budget this run targets
+            run_name: Optional explicit run name (uses auto-generated if None)
+        """
         if self.rank != 0:
             return
-        
-        budget_str = format_budget(target_budget)
-        run_name = f"{base_config.get('model_size', 'unknown')}_{base_config.get('pe_type', 'unknown')}_{budget_str}_s{base_config.get('seed', 42)}"
-        
+
+        # use provided run_name or generate one
+        if run_name is None:
+            budget_str = format_budget(target_budget)
+            run_name = f"{base_config.get('model_size', 'unknown')}_{base_config.get('pe_type', 'unknown')}_{budget_str}_s{base_config.get('seed', 42)}"
+
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+
+        # W&B initialization: only resume if run_id came from checkpoint (explicit --resume)
         if self.run_id:
-            # resuming existing run - rewind to checkpoint step to match local history
+            print(f"W&B: Resuming run {self.run_id} from checkpoint")
             wandb.init(
                 project="pos-enc-bench",
                 resume_from=f"{self.run_id}?_step={self.consumed_tokens}"
             )
         else:
-            # new run
+            print(f"W&B: Creating new run '{run_name}'")
             run = wandb.init(
                 project="pos-enc-bench",
                 group=group,
@@ -162,7 +173,7 @@ class Trainer:
                 config={**base_config, "target_budget": target_budget},
             )
             self.run_id = run.id
-            
+
             # fresh decay: replay shared history up to branch point
             if self.wsd_stage == "decay_only" and self.branch_tokens and self.resume_checkpoint_path:
                 history_dir = os.path.dirname(self.resume_checkpoint_path)
@@ -177,11 +188,129 @@ class Trainer:
                             except EOFError:
                                 break
 
+        # define custom step axis: tokens as primary x-axis
+        wandb.define_metric("tokens")
+        wandb.define_metric("train/*", step_metric="tokens")
+        wandb.define_metric("val/*", step_metric="tokens")
+        wandb.define_metric("time/*", step_metric="tokens")
+        wandb.define_metric("grad/*", step_metric="tokens")
+        wandb.define_metric("wsd/*", step_metric="tokens")
+        wandb.define_metric("gpu/*", step_metric="tokens")
+        wandb.define_metric("param/*", step_metric="tokens")
+
+        # log comprehensive config (merge base_config with additional metadata)
+        full_config = {
+            **base_config,
+            "target_budget": target_budget,
+            "run_name": run_name,
+            "group": group,
+            "world_size": self.world_size,
+            "effective_batch_size": self.batch_size * self.world_size * self.grad_accum_steps,
+            "tokens_per_step": self.tokens_per_step,
+            "grad_accum_steps": self.grad_accum_steps,
+            "warmup_steps": self.warmup_steps,
+            "max_steps": self.max_steps,
+        }
+
+        # add model-specific config (tie_embedding, dropout, etc.)
+        model_obj = self.model.module if hasattr(self.model, 'module') else self.model
+        model_config = getattr(model_obj, 'config', None)
+        if model_config is not None:
+            full_config["tie_embedding"] = getattr(model_config, 'tie_embedding', True)
+            full_config["pe_params"] = getattr(model_config, 'pe_params', {})
+            full_config["dropout"] = getattr(model_config, 'dropout', 0.0)
+        # count parameters
+        n_params = sum(p.numel() for p in model_obj.parameters())
+        n_trainable = sum(p.numel() for p in model_obj.parameters() if p.requires_grad)
+        full_config["n_params"] = n_params
+        full_config["n_trainable_params"] = n_trainable
+
+        if self.run_metadata:
+            full_config["data_config"] = self.run_metadata.get("data_config", {})
+            full_config["training_config"] = self.run_metadata.get("training_config", {})
+            full_config["validation_config"] = self.run_metadata.get("validation_config", {})
+            full_config["environment"] = self.run_metadata.get("environment", {})
+            full_config["cli_args"] = self.run_metadata.get("cli_args", {})
+        wandb.config.update(full_config, allow_val_change=True)
+
     def finish_wandb(self):
         """Finish wandb run."""
         if self.rank == 0:
             wandb.finish()
-    
+
+    @torch.no_grad()
+    def compute_logit_stats(self, logits: torch.Tensor) -> dict:
+        """Compute logit statistics for stability monitoring."""
+        flat_logits = logits[:, ::8, :].reshape(-1, logits.size(-1))  # sample every 8th token
+
+        probs = F.softmax(flat_logits, dim=-1)
+        entropy = -(probs * torch.log(probs + 1e-9)).sum(dim=-1).mean()
+
+        return {
+            "train/logits_mean": flat_logits.mean().item(),
+            "train/logits_std": flat_logits.std().item(),
+            "train/logits_min": flat_logits.min().item(),
+            "train/logits_max": flat_logits.max().item(),
+            "train/entropy": entropy.item(),
+        }
+
+    def compute_gradient_stats(self) -> dict:
+        """Compute per-layer gradient norms and aggregate statistics."""
+        model_obj = self.model.module if hasattr(self.model, 'module') else self.model
+        stats = {}
+
+        # per-layer gradient norms
+        for i, block in enumerate(model_obj.blocks):
+            block_grad_norm = sum(
+                p.grad.data.norm(2).item() ** 2 for p in block.parameters() if p.grad is not None
+            ) ** 0.5
+            if block_grad_norm > 0:
+                stats[f"grad/layer_{i}_norm"] = block_grad_norm
+
+        # aggregate stats
+        all_grads = [p.grad.data.view(-1) for p in model_obj.parameters() if p.grad is not None]
+        if all_grads:
+            flat_grads = torch.cat(all_grads)
+            flat_params = torch.cat([p.data.view(-1) for p in model_obj.parameters() if p.grad is not None])
+
+            stats["grad/mean"] = flat_grads.mean().item()
+            stats["grad/std"] = flat_grads.std().item()
+            stats["grad/max"] = flat_grads.abs().max().item()
+
+            param_norm = flat_params.norm(2).item()
+            if param_norm > 0:
+                stats["grad/update_norm_ratio"] = flat_grads.norm(2).item() / param_norm
+
+        return stats
+
+    def estimate_mfu(self, tokens_per_sec: float) -> float:
+        """Estimate Model FLOPs Utilization as percentage of peak GPU performance."""
+        model_obj = self.model.module if hasattr(self.model, 'module') else self.model
+        config = getattr(model_obj, 'config', None)
+        if config is None:
+            return 0.0
+
+        N, d, V, d_ff = config.n_layers, config.d_model, config.vocab_size, config.d_ff
+
+        # FLOPs per token (x3 for forward+backward)
+        flops_per_token = (12 * N * d * d + 8 * N * d * d_ff + 2 * d * V) * 3
+        achieved_flops = tokens_per_sec * flops_per_token
+
+        # peak FLOPs by GPU type
+        peak_flops = 100e12  # default
+        if torch.cuda.is_available():
+            gpu = torch.cuda.get_device_name(self.device).lower()
+            peak_map = {
+                'a100': 312e12, 'h100': 989e12, 'v100': 125e12,
+                '4090': 165e12, '3090': 71e12, 'l40': 181e12
+            }
+            for name, flops in peak_map.items():
+                if name in gpu:
+                    peak_flops = flops
+                    break
+
+        return (achieved_flops / peak_flops) * 100
+
     def log_wandb(self, metrics: dict, consumed_tokens: int):
         """Log to wandb. For full stage, also buffers for later flush."""
         if self.rank != 0:
@@ -233,10 +362,10 @@ class Trainer:
         else:
             return self.base_lr # fallback
     def save_checkpoint(self, path: str, dataloader=None, extra: dict | None = None):
-        """Save training checkpoint with all state for exact resumption."""
+        """Save training checkpoint."""
         if self.rank != 0:
-            return  # only rank 0 saves
-        
+            return
+
         checkpoint = {
             # Core training state
             'step': self.step,
@@ -278,22 +407,32 @@ class Trainer:
 
         if self.scaler is not None:
             checkpoint['scaler_state_dict'] = self.scaler.state_dict()
-        
 
+        # save RNG states for exact reproducibility on resume
+        rng_states = {
+            'python': random.getstate(),
+            'numpy': np.random.get_state(),
+            'torch': torch.get_rng_state(),
+        }
+        if torch.cuda.is_available():
+            rng_states['cuda'] = torch.cuda.get_rng_state_all()
+        checkpoint['rng_states'] = rng_states
 
         if extra:
             checkpoint.update(extra)
-        
+
         torch.save(checkpoint, path)
     
     def load_checkpoint(self, path: str, dataloader=None):
-        """Load training checkpoint and restore all state for exact resumption."""
-        self.resume_checkpoint_path = path  # remember where we loaded from
+        """Load training checkpoint and restore state."""
+        self.resume_checkpoint_path = path
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
 
         model_obj = self.model.module if hasattr(self.model, "module") else self.model
         model_config = getattr(model_obj, "config", None)
         ckpt_config = checkpoint.get("config")
+
+        # config validation
         if model_config is not None and ckpt_config is not None:
             current_config = asdict(model_config) if is_dataclass(model_config) else model_config
             if current_config != ckpt_config:
@@ -301,8 +440,8 @@ class Trainer:
                     "Checkpoint config does not match current model config. "
                     "Recreate the model from the checkpoint config to resume safely."
                 )
-        
-        # Restore model and optimizer
+
+        # restore model and optimizer
         if hasattr(self.model, 'module'):
             self.model.module.load_state_dict(checkpoint['model_state_dict'])
         else:
@@ -346,61 +485,97 @@ class Trainer:
 
         if self.scaler is not None and 'scaler_state_dict' in checkpoint:
             self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
-        
 
+        # restore RNG states for exact reproducibility
+        if 'rng_states' in checkpoint:
+            rng_states = checkpoint['rng_states']
+            random.setstate(rng_states['python'])
+            np.random.set_state(rng_states['numpy'])
+            torch.set_rng_state(rng_states['torch'])
+            if 'cuda' in rng_states and torch.cuda.is_available():
+                torch.cuda.set_rng_state_all(rng_states['cuda'])
+            if self.rank == 0:
+                print("  RNG states restored for deterministic resume")
 
         return checkpoint
     
-    def train_step(self, x: torch.Tensor, y: torch.Tensor) -> tuple[float, float, float, bool]:
+    def train_step(self, x: torch.Tensor, y: torch.Tensor, compute_grad_stats: bool = False) -> tuple[float, float, float, bool, float, dict]:
         """Single training step with gradient accumulation.
-        
+
         note: self.step counts optimizer updates (not iterations).
+
+        Args:
+            x: Input tensor
+            y: Target tensor
+            compute_grad_stats: If True, compute per-layer gradient stats before zeroing gradients
+
+        Returns:
+            loss: The loss value for this micro-batch (unscaled by grad_accum)
+            grad_norm: Gradient norm after clipping (0 if no optimizer step)
+            weight_norm: L2 norm of all parameters (0 if no optimizer step)
+            did_step: True if optimizer step was taken
+            lr_used: Learning rate actually used for this step (0 if no optimizer step)
+            grad_stats: Per-layer gradient statistics (empty dict if not computed)
         """
         x, y = x.to(self.device), y.to(self.device)
+        logit_stats = {}
 
         if self.device.type == "cuda":
             with autocast("cuda", dtype=self.dtype):
-                logits = self.model(x) 
-                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))  
+                logits = self.model(x)
+                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+                # compute logit stats for stability monitoring (before backward)
+                if compute_grad_stats:
+                    logit_stats = self.compute_logit_stats(logits)
         else:
             logits = self.model(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))  
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+            if compute_grad_stats:
+                logit_stats = self.compute_logit_stats(logits)
 
         loss = loss / self.grad_accum_steps
 
         if self.scaler:
             self.scaler.scale(loss).backward()
         else:
-            loss.backward() 
+            loss.backward()
 
         grad_norm = 0.0
         weight_norm = 0.0
         did_step = False
+        lr_used = 0.0
+        grad_stats = logit_stats  # start with logit stats, will add gradient stats later
 
         self.micro_step += 1
-        
+
         # only update weights every grad_accum_steps
         if self.micro_step % self.grad_accum_steps == 0:
+            # capture LR BEFORE incrementing step (this is the LR actually used)
+            lr_used = self.get_lr(self.step)
             for param_group in self.optimizer.param_groups:
-                param_group['lr'] = self.get_lr(self.step)
+                param_group['lr'] = lr_used
 
             if self.scaler:
-                self.scaler.unscale_(self.optimizer) 
+                self.scaler.unscale_(self.optimizer)
                 grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip).item()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
                 grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip).item()
-                self.optimizer.step() 
-            
+                self.optimizer.step()
+
             with torch.no_grad():
                 weight_norm = sum(p.norm(2).item() ** 2 for p in self.model.parameters()) ** 0.5
+
+            # compute per-layer gradient stats before zeroing (this is expensive, so only when requested)
+            if compute_grad_stats:
+                grad_stats.update(self.compute_gradient_stats())
 
             self.optimizer.zero_grad()
             self.step += 1  # step = optimizer update count
             did_step = True
-        
-        return loss.item() * self.grad_accum_steps, grad_norm, weight_norm, did_step
+
+        return loss.item() * self.grad_accum_steps, grad_norm, weight_norm, did_step, lr_used, grad_stats
     
     @torch.no_grad()
     def validate(self, dataloader) -> float:
@@ -433,21 +608,27 @@ class Trainer:
 
     def train(self, dataloader, val_dataloader=None, eval_interval: int = 500, log_interval: int = 100, max_tokens: int | None = None):
         """Train the model using self.max_steps set by configure_wsd().
-        
+
         Args:
             log_interval: Log every N optimizer steps
             max_tokens: Optional hard stop on consumed tokens
         """
         self.model.train()
         self.optimizer.zero_grad()
-        
+
         # accumulators (reset every log_interval steps)
         accum_loss = 0.0
         steps_since_log = 0
         tokens_since_log = 0
         start_time = time.time()
         step_loss = 0.0
-        
+        last_lr_used = 0.0 
+
+        # timing accumulators (for time/* metrics)
+        dt_data_accum = 0.0
+        dt_step_accum = 0.0
+        timing_count = 0
+
         if self.rank == 0:
             print(f"\n{'='*60}")
             print(f"Training started!")
@@ -460,17 +641,34 @@ class Trainer:
             print(f"  Checkpoint dir: {self.checkpoint_dir}")
             print(f"{'='*60}\n")
 
+        t_data_start = time.time()
+        last_grad_stats = {}  # store gradient stats for logging
         for x, y in dataloader:
-            loss, grad_norm, weight_norm, did_step = self.train_step(x, y)
+            t_data_end = time.time()
+            dt_data_accum += (t_data_end - t_data_start) * 1000  # ms
+
+            # compute gradient stats only on steps that will be logged to avoid overhead
+            should_compute_grad_stats = ((self.step + 1) % log_interval == 0)
+            t_step_start = time.time()
+            loss, grad_norm, weight_norm, did_step, lr_used, grad_stats = self.train_step(
+                x, y, compute_grad_stats=should_compute_grad_stats
+            )
+            t_step_end = time.time()
+            dt_step_accum += (t_step_end - t_step_start) * 1000  # ms
+            timing_count += 1
+
+            if grad_stats:
+                last_grad_stats = grad_stats
+
             step_loss += loss  # accumulate across grad_accum iterations
             current_tokens = x.numel() * self.world_size
             tokens_since_log += current_tokens
             self.consumed_tokens += current_tokens
-            
+
             # count samples (global batch size)
             # x.shape[0] is local batch size
             self.samples_seen += x.shape[0] * self.world_size
-            
+
             if did_step:
                 # this was an optimizer step
                 # step_loss contains SUM of losses from micro-batches
@@ -478,29 +676,84 @@ class Trainer:
                 accum_loss += (step_loss / self.grad_accum_steps)
                 steps_since_log += 1
                 step_loss = 0.0  # reset for next step
-                
+                last_lr_used = lr_used  # save for logging
+
                 # log every log_interval optimizer steps
                 if self.step % log_interval == 0 and self.step > 0:
                     elapsed = time.time() - start_time
                     avg_loss = accum_loss / steps_since_log
                     tokens_per_sec = tokens_since_log / elapsed
-                    
+
+                    # DDP: reduce loss across all ranks for accurate global average
+                    if self.world_size > 1:
+                        # pack accum_loss and steps_since_log for reduction
+                        loss_stats = torch.tensor([accum_loss, float(steps_since_log)], device=self.device)
+                        dist.all_reduce(loss_stats, op=dist.ReduceOp.SUM)
+                        global_loss_sum, global_steps = loss_stats[0].item(), loss_stats[1].item()
+                        avg_loss = global_loss_sum / global_steps if global_steps > 0 else 0.0
+
                     if self.rank == 0:
+                        # calculate per-GPU MFU
+                        tokens_per_sec_per_gpu = tokens_per_sec / self.world_size
+                        mfu = self.estimate_mfu(tokens_per_sec_per_gpu)
+
+                        # core training metrics
                         metrics = {
                             "train/loss": avg_loss,
+                            "train/ppl": np.exp(avg_loss) if avg_loss < 20 else float('inf'),
                             "train/tokens_per_sec": tokens_per_sec,
                             "train/step": self.step,
-                            "train/tokens": self.consumed_tokens, 
-                            "train/lr": self.get_lr(self.step),
+                            "train/tokens": self.consumed_tokens,
+                            "train/lr": last_lr_used,
                             "train/grad_norm": grad_norm,
+                            "train/grad_clipped": 1.0 if grad_norm > self.grad_clip else 0.0,
+                            "train/samples_seen": self.samples_seen,
+                            "train/tokens_per_step": self.tokens_per_step,
+                            "train/progress_pct": (self.step / self.max_steps) * 100 if self.max_steps > 0 else 0,
+                            "train/mfu": mfu,
                             "param/weight_norm": weight_norm,
                         }
+
+                        # WSD specific metrics
+                        metrics["wsd/stage"] = 1 if self.wsd_stage == "full" else 2  # 1=full, 2=decay_only
+                        if self.target_budget:
+                            metrics["wsd/target_budget"] = self.target_budget
+                        if self.branch_tokens:
+                            metrics["wsd/branch_tokens"] = self.branch_tokens
+                        if self.decay_start_step is not None:
+                            metrics["wsd/decay_start_step"] = self.decay_start_step
+                            if self.decay_steps > 0:
+                                decay_progress = (self.step - self.decay_start_step) / self.decay_steps
+                                metrics["wsd/decay_progress_pct"] = min(100.0, max(0.0, decay_progress * 100))
+
+                        # GPU memory metrics
+                        if torch.cuda.is_available():
+                            metrics["gpu/memory_allocated_gb"] = torch.cuda.memory_allocated(self.device) / 1e9
+                            metrics["gpu/memory_reserved_gb"] = torch.cuda.memory_reserved(self.device) / 1e9
+                            metrics["gpu/memory_allocated_max_gb"] = torch.cuda.max_memory_allocated(self.device) / 1e9
+
+                        # AMP scaler metrics
+                        if self.scaler is not None:
+                            metrics["train/loss_scale"] = self.scaler.get_scale()
+
+                        # timing breakdown
+                        if timing_count > 0:
+                            metrics["time/data_ms"] = dt_data_accum / timing_count
+                            metrics["time/step_ms"] = dt_step_accum / timing_count
+
+                        # per-layer gradient stats
+                        if last_grad_stats:
+                            metrics.update(last_grad_stats)
+
                         self.log_wandb(metrics, self.consumed_tokens)
-                    
+
                     # reset accumulators
                     accum_loss = 0.0
                     steps_since_log = 0
                     tokens_since_log = 0
+                    dt_data_accum = 0.0
+                    dt_step_accum = 0.0
+                    timing_count = 0
                     start_time = time.time()
                 
                 # validation
@@ -552,7 +805,10 @@ class Trainer:
 
                 if self.step >= self.max_steps:
                     break
-        
+
+            # reset data timer for next iteration
+            t_data_start = time.time()
+
         # save final checkpoint
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         self.save_checkpoint(f"{self.checkpoint_dir}/final.pt", dataloader)
