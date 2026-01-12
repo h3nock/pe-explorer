@@ -1,0 +1,35 @@
+program: ./scripts/run_sweep.sh
+project: pe-explorer
+method: bayes
+metric:
+  name: val/loss
+  goal: minimize
+
+early_terminate:
+  type: hyperband
+  min_iter: 5
+  eta: 3
+
+parameters:
+  model-size:
+    value: tiny
+  pe-type:
+    value: rope
+  
+  lr:
+    distribution: log_uniform_values
+    min: 0.0001
+    max: 0.002
+  
+  warmup-steps:
+    distribution: int_uniform
+    min: 200
+    max: 2000
+  
+  dropout:
+    values: [0.0, 0.1]
+  
+  grad-clip:
+    value: 1.0
+  seed:
+    value: 42
