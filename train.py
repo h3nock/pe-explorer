@@ -105,8 +105,7 @@ def get_run_name(base_name: str, current_config: dict, checkpoint_base_dir: Path
 
     # case 2: existing checkpoint -> check if configs match
     try:
-        latest_path = checkpoint_dir / "latest.pt"
-        ckpt_path = latest_path if latest_path.exists() else next(checkpoint_dir.glob("*.pt"))
+        ckpt_path = next(checkpoint_dir.glob("*.pt"))
         checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=False)
         saved_config = checkpoint.get('config', {})
 
@@ -259,10 +258,6 @@ def main():
         "cli_args": vars(args),
         "environment": env_info,
     }
-
-    # safeguard: abort if starting fresh but checkpoint dir already has checkpoints
-    if not args.resume and rank == 0 and Path(base_checkpoint_dir, "latest.pt").exists():
-        raise SystemExit(f"ERROR: {base_checkpoint_dir}/latest.pt exists. Use --resume or delete it.")
 
     # save requirements.txt to checkpoint dir (happens only on fresh runs and rank 0)
     if not args.resume:
