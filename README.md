@@ -46,7 +46,7 @@ python eval.py checkpoints/tiny_rope_2.4B_s42/latest.pt
 ## Project Structure
 
 ```
-pos-enc-bench/
+pe-explorer/
 ├── train.py           # Main training script
 ├── eval.py            # Evaluation on algorithmic tasks
 ├── configs/

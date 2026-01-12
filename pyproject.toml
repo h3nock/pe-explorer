@@ -1,7 +1,7 @@
 [project]
-name = "pos-enc-bench"
+name = "pe-explorer"
 version = "0.1.0"
-description = "Positional Encoding Benchmark for Transformers"
+description = "Empirical exploration of positional encoding methods in transformers"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

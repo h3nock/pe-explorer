@@ -161,13 +161,13 @@ class Trainer:
         if self.run_id:
             print(f"W&B: Resuming run {self.run_id} from checkpoint")
             wandb.init(
-                project="pos-enc-bench",
+                project="pe-explorer",
                 resume_from=f"{self.run_id}?_step={self.consumed_tokens}"
             )
         else:
             print(f"W&B: Creating new run '{run_name}'")
             run = wandb.init(
-                project="pos-enc-bench",
+                project="pe-explorer",
                 group=group,
                 name=run_name,
                 config={**base_config, "target_budget": target_budget},
