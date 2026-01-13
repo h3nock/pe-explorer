@@ -413,22 +413,33 @@ def _generate_chunk(args):
     return data
 
 
-def generate_train_dataset(num_examples: int, config: dict, seed: int, chunk_size: int = 250_000):
+def generate_train_dataset(num_examples: int, config: dict, seed: int, chunk_size: int = 250_000, batch_size: int = 10_000):
+    # batch_size = how much to generate at once (tune for RAM)
+    # chunk_size = how many examples per output file
     set_seed(seed)
     tasks = list(config["tasks"].keys())
     weights = [config["tasks"][t]["weight"] for t in tasks]
 
-    num_chunks = (num_examples + chunk_size - 1) // chunk_size
+    buffer = []
+    generated = 0
 
-    for _ in tqdm(range(num_chunks), desc="Generating chunks"):
-        data = []
-        current_chunk_size = min(chunk_size, num_examples)
-        for _ in range(current_chunk_size):
-            task = random.choices(tasks, weights=weights, k=1)[0]
-            data.append(_generate_one(task, config, mode="train"))
+    with tqdm(total=num_examples, desc="Generating") as pbar:
+        while generated < num_examples:
+            current_batch = min(batch_size, num_examples - generated)
+            for _ in range(current_batch):
+                task = random.choices(tasks, weights=weights, k=1)[0]
+                buffer.append(_generate_one(task, config, mode="train"))
+            generated += current_batch
+            pbar.update(current_batch)
 
-        num_examples -= current_chunk_size
-        yield data
+            # yield full chunks when ready
+            while len(buffer) >= chunk_size:
+                yield buffer[:chunk_size]
+                buffer = buffer[chunk_size:]
+
+    # yield any remaining data
+    if buffer:
+        yield buffer
 
 
 def generate_train_dataset_parallel(
@@ -437,25 +448,38 @@ def generate_train_dataset_parallel(
     seed: int,
     num_workers: int = 8,
     chunk_size: int = 250_000,
+    batch_size: int = 10_000,
 ):
-    num_chunks = (num_examples + chunk_size - 1) // chunk_size
+    # batch_size = how much each worker holds in memory at once 
+    # chunk_size = how many examples per output file (tune this for I/O efficiency)
+    num_batches = (num_examples + batch_size - 1) // batch_size
 
-    chunks = []
-    for i in range(num_chunks):
-        start = i * chunk_size
-        end = min((i + 1) * chunk_size, num_examples)
-        chunks.append((start, end, seed))
+    batches = []
+    for i in range(num_batches):
+        start = i * batch_size
+        end = min((i + 1) * batch_size, num_examples)
+        batches.append((start, end, seed))
 
-    print(f"Generating {num_examples:,} examples in {len(chunks)} chunks using {num_workers} workers...")
+    print(f"Generating {num_examples:,} train examples with {num_workers} workers...")
 
     worker_config = config
     if "filler_sampler" in config and "filler_sampler_params" in config:
         worker_config = dict(config)
         worker_config.pop("filler_sampler", None)
 
+    buffer = []
     with Pool(num_workers, initializer=_init_worker, initargs=(worker_config,)) as pool:
-        for chunk in tqdm(pool.imap(_generate_chunk, chunks), total=len(chunks)):
-            yield chunk
+        for batch_data in tqdm(pool.imap(_generate_chunk, batches), total=len(batches), desc="Generating"):
+            buffer.extend(batch_data)
+            
+            # yield full chunks when ready
+            while len(buffer) >= chunk_size:
+                yield buffer[:chunk_size]
+                buffer = buffer[chunk_size:]
+    
+    # yield any remaining data
+    if buffer:
+        yield buffer
 
 
 def generate_eval_dataset(num_per_task: int, config: dict, seed: int) -> list[dict]:
@@ -628,6 +652,8 @@ def main():
     gen_parser.add_argument("-n", "--num_examples", type=int, default=None, help="Number of training examples")
     gen_parser.add_argument("--eval_per_task", type=int, default=None)
     gen_parser.add_argument("--num_workers", type=int, default=1)
+    gen_parser.add_argument("--batch_size", type=int, default=10_000, help="Examples per worker batch (lower = less RAM)")
+
 
     # Tokenize
     tok_parser = subparsers.add_parser("tokenize", help="Tokenize parquet to binary")
@@ -704,9 +730,9 @@ def main():
     # Generate train
     print(f"\n{'='*50}\nTRAIN: {num_examples:,} examples (context={config['context_len']})\n{'='*50}")
     if args.num_workers > 1:
-        chunk_gen = generate_train_dataset_parallel(num_examples, config, gen_cfg["train_seed"], args.num_workers, shard_size)
+        chunk_gen = generate_train_dataset_parallel(num_examples, config, gen_cfg["train_seed"], args.num_workers, shard_size, args.batch_size)
     else:
-        chunk_gen = generate_train_dataset(num_examples, config, gen_cfg["train_seed"], shard_size)
+        chunk_gen = generate_train_dataset(num_examples, config, gen_cfg["train_seed"], shard_size, args.batch_size)
     for i, chunk in enumerate(chunk_gen):
         pd.DataFrame(chunk).to_parquet(output_dir / f"train_{i:04d}.parquet", index=False)
 
