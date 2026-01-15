@@ -11,7 +11,6 @@ import json
 import multiprocessing as mp
 import random
 import string
-import bisect
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import Pool
 from pathlib import Path
@@ -30,7 +29,6 @@ from src.data.tokenization import (
 SHARD_SIZE = 100_000_000  # 100M tokens per shard
 BUFFER_SIZE = 1_000_000
 CACHE_DIR = Path.home() / ".cache" / "algorithmic"
-FINEWEB_CACHE_DIR = Path.home() / ".cache" / "fineweb-edu"
 DIGITS = [str(i) for i in range(10)]
 LETTERS = list(string.ascii_lowercase)
 
@@ -79,41 +77,59 @@ def load_config(config_path: str = "configs/data_generation.yaml") -> dict:
 
 
 class FillerPool:
-    """Pre-tokenized filler pool for exact token-space sampling."""
+    """Pre-tokenized filler pool with memmap for fast loading."""
 
-    def __init__(self, pool_path: Path):
-        df = pd.read_parquet(pool_path)
-        token_ids_raw = df["token_ids"].tolist()
-        self.token_ids = [list(x) for x in token_ids_raw]
-        self.token_lens = df["token_len"].tolist()
-        # sorted indices for bisect
-        self.sorted_idx = sorted(range(len(self.token_lens)), key=lambda i: self.token_lens[i])
-        self.sorted_lens = [self.token_lens[i] for i in self.sorted_idx]
+    def __init__(self, pool_dir: Path):
+        pool_dir = Path(pool_dir)
+        
+        if not pool_dir.is_dir():
+            raise ValueError(f"Filler pool directory not found: {pool_dir}. Run 'build-filler' first.")
+        
+        meta_path = pool_dir / "meta.json"
+        if not meta_path.exists():
+            raise ValueError(f"Invalid filler pool: {meta_path} not found")
+        
+        with open(meta_path) as f:
+            meta = json.load(f)
+        
+        dtype = np.dtype(meta["dtype"])
+        total_tokens = meta["total_tokens"]
+        
+        self._tokens = np.memmap(pool_dir / "tokens.bin", dtype=dtype, mode='r', shape=(total_tokens,))
+        self._offsets = np.load(pool_dir / "offsets.npy", mmap_mode='r')
+        self._lengths = np.load(pool_dir / "lengths.npy", mmap_mode='r')
+        self._sorted_idx = np.load(pool_dir / "sorted_idx.npy", mmap_mode='r')
+        self._sorted_lens = np.load(pool_dir / "sorted_lens.npy", mmap_mode='r')
+        
         self.bos = get_bos_token_id(_get_enc())
         if self.bos is None:
             raise ValueError("Tokenizer missing <|bos|> special token")
-        print(f"  Loaded filler pool: {len(self.token_ids):,} docs")
+        
+        print(f"  Filler pool ready: {len(self._lengths):,} docs")
+
+    def _get_doc(self, idx: int) -> list[int]:
+        """Get document tokens by index."""
+        start = self._offsets[idx]
+        end = start + self._lengths[idx]
+        return self._tokens[start:end].tolist()
 
     def sample(self, target_tokens: int) -> list[int]:
-        """Sample filler tokens. Returns list[int], not text."""
+        """Sample filler tokens. Returns list[int]."""
         if target_tokens <= 0:
             return []
 
-        # try to find a single doc that is long enough
-        pos = bisect.bisect_left(self.sorted_lens, target_tokens)
+        pos = np.searchsorted(self._sorted_lens, target_tokens)
 
-        if pos < len(self.sorted_idx):
-            # pick one doc randomly 
-            doc_idx = self.sorted_idx[random.randrange(pos, len(self.sorted_idx))]
-            tokens = self.token_ids[doc_idx]
-            return tokens[:target_tokens]
+        if pos < len(self._sorted_idx):
+            doc_idx = self._sorted_idx[random.randrange(pos, len(self._sorted_idx))]
+            return self._get_doc(doc_idx)[:target_tokens]
 
         # concatenate multiple docs if needed
         result: list[int] = []
         first_doc = True
         while len(result) < target_tokens:
-            idx = random.randrange(len(self.token_ids))
-            doc_tokens = self.token_ids[idx]
+            idx = random.randrange(len(self._lengths))
+            doc_tokens = self._get_doc(idx)
             if not first_doc and self.bos is not None:
                 result.append(self.bos)
             result.extend(doc_tokens)
@@ -122,17 +138,17 @@ class FillerPool:
         return result[:target_tokens]
 
     def __len__(self) -> int:
-        return len(self.token_ids)
+        return len(self._lengths)
 
 
 def build_filler_pool(
     fineweb_dir: Path,
     shard_range: tuple[int, int],
-    output_path: Path,
+    output_dir: Path,
     min_tokens: int = 50,
     max_docs: int = 50000,
 ) -> None:
-    """Build pre-tokenized filler pool from FineWeb shards."""
+    """Build pre-tokenized filler pool in memmap format."""
     fineweb_dir = fineweb_dir.expanduser()
     all_paths = sorted(fineweb_dir.rglob("*.parquet"))
     start_idx, end_idx = shard_range
@@ -142,32 +158,65 @@ def build_filler_pool(
         raise FileNotFoundError(f"No shards in range [{start_idx}, {end_idx}]")
 
     enc = load_encoding()
-    token_ids_list, token_lens = [], []
+    vocab_size = enc.n_vocab
+    dtype = np.uint16 if vocab_size <= 65535 else np.uint32
+    
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    offsets: list[int] = []
+    lengths: list[int] = []
+    total_tokens = 0
+    num_docs = 0
     done = False
 
     print(f"Building filler pool from {len(paths)} shards...")
-    for path in tqdm(paths, desc="Processing"):
-        if done:
-            break
-        pf = pq.ParquetFile(path)
-        for batch in pf.iter_batches(batch_size=1000, columns=["text"]):
+    print(f"  vocab_size={vocab_size}, dtype={dtype.__name__}")
+    
+    with open(output_dir / "tokens.bin", "wb") as f:
+        for path in tqdm(paths, desc="Processing"):
             if done:
                 break
-            for item in batch["text"]:
-                text = item.as_py()
-                if text:
-                    toks = enc.encode(text)
-                    if len(toks) >= min_tokens:
-                        token_ids_list.append(toks)
-                        token_lens.append(len(toks))
-                        if len(token_ids_list) >= max_docs:
-                            done = True
-                            break
+            pf = pq.ParquetFile(path)
+            for batch in pf.iter_batches(batch_size=1000, columns=["text"]):
+                if done:
+                    break
+                for item in batch["text"]:
+                    text = item.as_py()
+                    if text:
+                        toks = enc.encode(text)
+                        if len(toks) >= min_tokens:
+                            # stream write tokens
+                            np.asarray(toks, dtype=dtype).tofile(f)
+                            offsets.append(total_tokens)
+                            lengths.append(len(toks))
+                            total_tokens += len(toks)
+                            num_docs += 1
+                            if num_docs >= max_docs:
+                                done = True
+                                break
 
-    df = pd.DataFrame({"token_ids": token_ids_list, "token_len": token_lens})
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(output_path, index=False)
-    print(f"Saved {len(df):,} docs to {output_path}")
+    # write arrays
+    offsets_arr = np.array(offsets, dtype=np.int64)
+    lengths_arr = np.array(lengths, dtype=np.int32)
+    sorted_idx = np.argsort(lengths_arr)
+    
+    np.save(output_dir / "offsets.npy", offsets_arr)
+    np.save(output_dir / "lengths.npy", lengths_arr)
+    np.save(output_dir / "sorted_idx.npy", sorted_idx)
+    np.save(output_dir / "sorted_lens.npy", lengths_arr[sorted_idx])
+    
+    # write metadata
+    meta = {
+        "dtype": str(dtype.__name__),
+        "vocab_size": vocab_size,
+        "num_docs": num_docs,
+        "total_tokens": total_tokens,
+    }
+    with open(output_dir / "meta.json", "w") as f:
+        json.dump(meta, f, indent=2)
+    
+    print(f"Saved {num_docs:,} docs ({total_tokens:,} tokens) to {output_dir}/")
 
 
 def set_seed(seed: int):
@@ -284,15 +333,7 @@ def generate_copy_distance_example(cfg: dict, content_sampling: dict, filler_poo
 
 def generate_length_task(task: str, cfg: dict, content_sampling: dict, mode: str, length_override: int | None = None) -> dict:
     """Unified generator for reverse, sort, simple_copy, no_carry_add."""
-    length_cfg = cfg.get("length", {})
-    if mode == "train":
-        length_range = length_cfg.get("train", length_cfg.get("eval_id"))
-    elif mode == "id":
-        length_range = length_cfg.get("eval_id", length_cfg.get("train"))
-    elif mode == "ood":
-        length_range = length_cfg.get("eval_ood", length_cfg.get("train"))
-    else:
-        raise ValueError(f"Unknown mode: {mode}")
+    length_range = select_length_range(cfg, mode)
     length = length_override if length_override is not None else random.randint(length_range[0], length_range[1])
 
     if task == "no_carry_add":
@@ -641,7 +682,7 @@ def main():
     # Build filler pool
     filler_parser = subparsers.add_parser("build-filler", help="Build pre-tokenized filler pool")
     filler_parser.add_argument("--fineweb_dir", type=str, default="~/.cache/fineweb-edu")
-    filler_parser.add_argument("--output", type=str, default="data/filler_pool.parquet")
+    filler_parser.add_argument("--output", type=str, default="data/filler_pool", help="Output directory for memmap filler pool")
     filler_parser.add_argument("-n", "--num_examples", type=int, default=50000, help="Number of docs to include")
     filler_parser.add_argument("--min_tokens", type=int, default=50)
 
@@ -673,7 +714,7 @@ def main():
         build_filler_pool(
             fineweb_dir=Path(args.fineweb_dir),
             shard_range=shard_range,
-            output_path=Path(args.output),
+            output_dir=Path(args.output),
             min_tokens=args.min_tokens,
             max_docs=args.num_examples,
         )
@@ -713,8 +754,8 @@ def main():
     # Load filler pool if needed
     needs_filler = any(t in config["tasks"] for t in ("passkey", "copy_distance"))
     if needs_filler:
-        pool_path = Path(filler_cfg.get("pool_path", "data/filler_pool.parquet"))
-        if not pool_path.exists():
+        pool_path = Path(filler_cfg.get("pool_path", "data/filler_pool"))
+        if not pool_path.is_dir():
             parser.error(f"Filler pool not found: {pool_path}. Run 'build-filler' first.")
         if args.num_workers > 1:
             config["filler_pool_path"] = str(pool_path)

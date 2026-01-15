@@ -54,7 +54,7 @@ tasks:
       eval_ood: [13, 20]
 
 filler:
-  pool_path: "data/filler_pool.parquet"
+  pool_path: "data/filler_pool"
   context_len: 1024
   eval_context_len: 2048
 
