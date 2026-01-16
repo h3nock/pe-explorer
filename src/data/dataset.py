@@ -223,11 +223,6 @@ class InterleavedDataset(Dataset):
         local_idx = cycle_idx * self.weights[dataset_idx] + local_offset
         return self.datasets[dataset_idx][local_idx]
 
-def _expand_shard_range(shard_range: list[int] | None) -> list[int] | None:
-    """Convert [start, end] to [start, start+1, ..., end]."""
-    if shard_range is None:
-        return None
-    return list(range(shard_range[0], shard_range[1] + 1))
 
 
 def get_dataloader(
@@ -253,8 +248,6 @@ def get_dataloader(
     fineweb_path = fineweb_cfg.get("tokenized_path", DEFAULT_TOKENIZED_DIR)
 
     if mode == "train":
-        # use training_shards, optionally mix with other sources
-        train_shards = _expand_shard_range(fineweb_cfg.get("training_shards"))
 
         if "mix_ratio" in data_config:
             # blend multiple sources
@@ -269,7 +262,7 @@ def get_dataloader(
                 weights.append(w)
 
                 if key == "fineweb":
-                    ds = MemmapDataset(fineweb_path, seq_len=seq_len, shards=train_shards)
+                    ds = MemmapDataset(fineweb_path, seq_len=seq_len)
                 else:
                     path = data_config.get(key, {}).get("tokenized_path")
                     if not path:
@@ -286,13 +279,13 @@ def get_dataloader(
         else:
             # single source training
             dataset = MemmapDataset(
-                fineweb_path, seq_len=seq_len, token_budget=token_budget, shards=train_shards
+                fineweb_path, seq_len=seq_len, token_budget=token_budget
             )
     else:
-        # use validation_shards from fineweb only
-        val_shards = _expand_shard_range(fineweb_cfg.get("validation_shards"))
+        # use validation data from separate directory
+        val_path = fineweb_cfg.get("val_tokenized_path", fineweb_path)
         dataset = MemmapDataset(
-            fineweb_path, seq_len=seq_len, token_budget=token_budget, shards=val_shards
+            val_path, seq_len=seq_len, token_budget=token_budget
         )
 
     sampler = DeterministicSampler(
