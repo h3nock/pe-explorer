@@ -19,6 +19,8 @@ parameters:
     value: tiny
   pe-type:
     value: rope
+  batch-size:
+    value: 32
   
   lr:
     distribution: log_uniform_values
