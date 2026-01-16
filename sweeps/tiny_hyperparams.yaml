@@ -20,7 +20,9 @@ parameters:
   pe-type:
     value: rope
   batch-size:
-    value: 32
+    value: 16
+  grad-accum-steps:
+    value: 2
   
   lr:
     distribution: log_uniform_values
