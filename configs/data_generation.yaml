@@ -6,7 +6,7 @@ content_sampling:
 
 tasks:
   passkey:
-    weight: 0.20
+    weight: 0.02
     code_len: [1, 5]
     # distances: fraction of context where target info is placed
     # 0.25 = near start (easy), 1.0 = end of training context, >1.0 = beyond training (extrapolation test)
@@ -16,7 +16,7 @@ tasks:
       eval_ood: [1.5, 2.0]
 
   copy_distance:
-    weight: 0.25
+    weight: 0.02
     content_len: 5
     # distances: how far back the content to copy is placed
     distances:
@@ -25,21 +25,21 @@ tasks:
       eval_ood: [1.5, 2.0]
 
   reverse:
-    weight: 0.18
+    weight: 0.15
     length:
       train: [3, 8]
       eval_id: [3, 8]
       eval_ood: [9, 16]
 
   sort:
-    weight: 0.17
+    weight: 0.33
     length:
       train: [3, 6]
       eval_id: [3, 6]
       eval_ood: [7, 10]
 
   no_carry_add:
-    weight: 0.12
+    weight: 0.33
     digits: [0, 4]
     length:
       train: [2, 5]
@@ -47,7 +47,7 @@ tasks:
       eval_ood: [6, 8]
 
   simple_copy:
-    weight: 0.08
+    weight: 0.15
     length:
       train: [4, 12]
       eval_id: [4, 12]
