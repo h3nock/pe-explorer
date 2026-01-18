@@ -145,17 +145,48 @@ def main():
     rank, local_rank, world_size = setup_distributed()
     config, training_config, validation_config, data_config = load_configs(args.model_size)
 
-    wsd_stage = args.wsd_stage or training_config.get("wsd_stage", "full")
+    # apply CLI overrides to configs
+    if args.batch_size is not None:
+        config["batch_size"] = args.batch_size
+    if args.tokens is not None:
+        config["max_token_budget"] = args.tokens
+    if args.wsd_stage is not None:
+        training_config["wsd_stage"] = args.wsd_stage
+    if args.warmup_steps is not None:
+        training_config["warmup_steps"] = args.warmup_steps
+    if args.dropout is not None:
+        training_config["dropout"] = args.dropout
+    if args.grad_clip is not None:
+        training_config["grad_clip"] = args.grad_clip
+    if args.lr is not None:
+        training_config["learning_rate"] = args.lr
+    else:
+        training_config.setdefault("learning_rate", config.get("learning_rate"))
+    if training_config.get("learning_rate") is None:
+        raise ValueError("learning_rate must be set in config or via --lr")
+    if args.decay_tokens is not None:
+        training_config["decay_tokens"] = args.decay_tokens
+    if args.log_interval is not None:
+        validation_config["log_interval"] = args.log_interval
+    if args.eval_interval is not None:
+        validation_config["interval"] = args.eval_interval
+
+    if args.pe_type is not None:
+        training_config["pe_type"] = args.pe_type
+    
+    pe_type = training_config.get("pe_type", "rope")
+
+    wsd_stage = training_config.get("wsd_stage", "full")
 
     # training parameters
-    batch_size = args.batch_size or config["batch_size"]
-    max_token_budget = args.tokens or config["max_token_budget"]
+    batch_size = config["batch_size"]
+    max_token_budget = config["max_token_budget"]
     max_seq_len = config["max_seq_len"]
     seed = args.seed
 
-    log_interval = args.log_interval or validation_config.get("log_interval", 10)
-    eval_interval = args.eval_interval or validation_config.get("interval", 500)
-    group_name = f"{args.model_size}_{args.pe_type}"
+    log_interval = validation_config.get("log_interval", 10)
+    eval_interval = validation_config.get("interval", 500)
+    group_name = f"{args.model_size}_{pe_type}"
 
     # build config dict for version comparison (must match ModelConfig fields)
     version_config = {
@@ -165,10 +196,10 @@ def main():
         'd_ff': config['d_ff'],
         'max_seq_len': max_seq_len,
         'vocab_size': training_config['vocab_size'],
-        'pe_type': args.pe_type,
+        'pe_type': pe_type,
         'pe_params': training_config.get('pe_params', {}),
         'tie_embedding': training_config.get('tie_embedding', True),
-        'dropout': args.dropout if args.dropout is not None else training_config.get('dropout', 0.0),
+        'dropout': training_config.get('dropout', 0.0),
     }
 
     # determine run name (explicit, from checkpoint dir, or auto-generated)
@@ -178,7 +209,7 @@ def main():
         run_name = Path(args.checkpoint_dir).name
     else:
         budget_str = format_budget(max_token_budget)
-        base_name = f"{args.model_size}_{args.pe_type}_{budget_str}_s{seed}"
+        base_name = f"{args.model_size}_{pe_type}_{budget_str}_s{seed}"
         run_name = get_run_name(base_name, version_config, Path("checkpoints"), rank)
 
     base_checkpoint_dir = args.checkpoint_dir or f"checkpoints/{run_name}"
@@ -190,7 +221,7 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-    model, optimizer = create_model_and_optimizer(config, training_config, args)
+    model, optimizer = create_model_and_optimizer(config, training_config, pe_type)
 
     # training dataloader
     dataloader = get_dataloader(
@@ -223,19 +254,59 @@ def main():
     effective_batch_size = batch_size * world_size * args.grad_accum_steps
     tokens_per_step = effective_batch_size * max_seq_len
     
-    # dynamic warmup: min(config value, 3% of total steps)
+    # dynamic warmup: min(config value, 3% of total steps) unless explicitly overridden
     max_train_steps = max_token_budget // tokens_per_step
-    warmup_steps = args.warmup_steps if args.warmup_steps is not None else min(training_config.get("warmup_steps", 2000), int(0.03 * max_train_steps))
+    if args.warmup_steps is not None:
+        warmup_steps = training_config["warmup_steps"]
+    else:
+        warmup_steps = min(training_config.get("warmup_steps", 2000), int(0.03 * max_train_steps))
+    training_config["warmup_steps"] = warmup_steps
     
-    # base config for wandb
-    base_config = {
-        **config,
-        "model_size": args.model_size,
-        "pe_type": args.pe_type,
+    # effective config for logging (single source of truth)
+    effective_model_config = {
+        "d_model": config["d_model"],
+        "n_layers": config["n_layers"],
+        "n_heads": config["n_heads"],
+        "d_ff": config["d_ff"],
+        "max_seq_len": config["max_seq_len"],
+        "vocab_size": training_config["vocab_size"],
+        "pe_type": pe_type,
+        "pe_params": training_config.get("pe_params", {}),
+        "dropout": training_config.get("dropout", 0.0),
+        "tie_embedding": training_config.get("tie_embedding", True),
+    }
+    effective_training_config = {
+        "optimizer": training_config.get("optimizer", "adamw"),
+        "learning_rate": training_config["learning_rate"],
+        "weight_decay": training_config.get("weight_decay", 0.0),
+        "beta1": training_config.get("beta1", 0.9),
+        "beta2": training_config.get("beta2", 0.95),
+        "warmup_steps": warmup_steps,
+        "grad_clip": training_config.get("grad_clip", 1.0),
+        "dtype": training_config.get("dtype", "float32"),
+        "wsd_stage": wsd_stage,
+        "decay_tokens": training_config.get("decay_tokens"),
+        "decay_ratio": training_config.get("decay_ratio", 0.1),
         "batch_size": batch_size,
-        "seed": seed,
-        "run_name": run_name,
-        "group": group_name,
+        "max_token_budget": max_token_budget,
+        "grad_accum_steps": args.grad_accum_steps,
+    }
+    effective_config = {
+        "run": {
+            "model_size": args.model_size,
+            "pe_type": pe_type,
+            "seed": seed,
+            "run_name": run_name,
+            "group": group_name,
+        },
+        "model": effective_model_config,
+        "training": effective_training_config,
+        "validation": validation_config,
+        "data": data_config,
+        "runtime": {
+            "checkpoint_dir": base_checkpoint_dir,
+            "resume": args.resume,
+        },
     }
 
     # capture environment for reproducibility
@@ -247,14 +318,8 @@ def main():
             print(f"Git commit: {env_info['git_commit']}")
 
     run_metadata = {
-        "model_size": args.model_size,
-        "pe_type": args.pe_type,
-        "seed": seed,
-        "tokenizer_name": "gpt2",
-        "size_config": config,
-        "training_config": training_config,
-        "validation_config": validation_config,
-        "data_config": data_config,
+        "effective_config": effective_config,
+        "tokenizer_name": "nanochat",
         "cli_args": vars(args),
         "environment": env_info,
     }
@@ -272,7 +337,7 @@ def main():
         batch_size=batch_size,
         max_seq_len=max_seq_len,
         grad_accum_steps=args.grad_accum_steps,
-        grad_clip=args.grad_clip if args.grad_clip is not None else training_config["grad_clip"],
+        grad_clip=training_config["grad_clip"],
         warmup_steps=warmup_steps,
         checkpoint_interval=max(max_token_budget // tokens_per_step // 20, 25),
         checkpoint_dir=base_checkpoint_dir,
@@ -303,9 +368,9 @@ def main():
     
     # WSD stage specific configuration
     if wsd_stage == "full":
-        run_full_stage(trainer, dataloader, val_dataloader, eval_interval, config, training_config, tokens_per_step, max_token_budget, base_config, group_name, rank, log_interval, run_name)
+        run_full_stage(trainer, dataloader, val_dataloader, eval_interval, config, training_config, tokens_per_step, max_token_budget, effective_config, group_name, rank, log_interval, run_name)
     elif wsd_stage == "decay_only":
-        run_decay_stage(trainer, dataloader, val_dataloader, eval_interval, checkpoint, args, tokens_per_step, base_config, group_name, rank, log_interval, run_name)
+        run_decay_stage(trainer, dataloader, val_dataloader, eval_interval, checkpoint, args, tokens_per_step, effective_config, group_name, rank, log_interval, run_name)
     
     cleanup_distributed()
 
@@ -379,7 +444,7 @@ def run_decay_stage(trainer, dataloader, val_dataloader, eval_interval, checkpoi
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-size", type=str, default="tiny", choices=["tiny", "small", "medium", "large"])
-    parser.add_argument("--pe-type", type=str, default="rope", choices=["none", "sinusoidal", "sinonly", "binary", "binary_norm", "decimal", "decimal_norm", "rope"])
+    parser.add_argument("--pe-type", type=str, default=None, choices=["none", "sinusoidal", "sinonly", "binary", "binary_norm", "decimal", "decimal_norm", "rope"])
     parser.add_argument("--grad-accum-steps", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size from config")
     parser.add_argument("--tokens", type=int, default=None, help="Override total tokens from config")
@@ -409,7 +474,7 @@ def load_configs(model_size):
     )
 
 
-def create_model_and_optimizer(config, training_config, args):
+def create_model_and_optimizer(config, training_config, pe_type: str):
     model_config = ModelConfig(
         d_model=config["d_model"],
         n_layers=config["n_layers"],
@@ -417,13 +482,13 @@ def create_model_and_optimizer(config, training_config, args):
         d_ff=config["d_ff"],
         max_seq_len=config["max_seq_len"],
         vocab_size=training_config["vocab_size"],
-        pe_type=args.pe_type,
+        pe_type=pe_type,
         pe_params=training_config.get("pe_params", {}),
-        dropout=args.dropout if args.dropout is not None else training_config.get("dropout", 0.0),
+        dropout=training_config.get("dropout", 0.0),
         tie_embedding=training_config.get("tie_embedding", True),
     )
     model = Transformer(model_config)
-    lr = args.lr if args.lr is not None else config["learning_rate"]
+    lr = training_config["learning_rate"]
     optimizer = AdamW(
         model.parameters(),
         lr=lr,

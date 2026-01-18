@@ -153,7 +153,13 @@ class Trainer:
         # use provided run_name or generate one
         if run_name is None:
             budget_str = format_budget(target_budget)
-            run_name = f"{base_config.get('model_size', 'unknown')}_{base_config.get('pe_type', 'unknown')}_{budget_str}_s{base_config.get('seed', 42)}"
+            run_meta = base_config.get("run", {})
+            model_meta = base_config.get("model", {})
+            run_name = (
+                f"{run_meta.get('model_size', 'unknown')}_"
+                f"{model_meta.get('pe_type', 'unknown')}_"
+                f"{budget_str}_s{run_meta.get('seed', 42)}"
+            )
 
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
@@ -170,7 +176,7 @@ class Trainer:
                 project="pe-explorer",
                 group=group,
                 name=run_name,
-                config={**base_config, "target_budget": target_budget},
+                config=base_config,
             )
             self.run_id = run.id
 
@@ -198,40 +204,36 @@ class Trainer:
         wandb.define_metric("gpu/*", step_metric="tokens")
         wandb.define_metric("param/*", step_metric="tokens")
 
-        # log comprehensive config (merge base_config with additional metadata)
-        full_config = {
-            **base_config,
-            "target_budget": target_budget,
-            "run_name": run_name,
-            "group": group,
-            "world_size": self.world_size,
-            "effective_batch_size": self.batch_size * self.world_size * self.grad_accum_steps,
-            "tokens_per_step": self.tokens_per_step,
-            "grad_accum_steps": self.grad_accum_steps,
-            "warmup_steps": self.warmup_steps,
-            "max_steps": self.max_steps,
-        }
-
-        # add model-specific config (tie_embedding, dropout, etc.)
-        model_obj = self.model.module if hasattr(self.model, 'module') else self.model
-        model_config = getattr(model_obj, 'config', None)
-        if model_config is not None:
-            full_config["tie_embedding"] = getattr(model_config, 'tie_embedding', True)
-            full_config["pe_params"] = getattr(model_config, 'pe_params', {})
-            full_config["dropout"] = getattr(model_config, 'dropout', 0.0)
-        # count parameters
+        # runtime/derived fields (keep config authoritative from base_config)
+        model_obj = self.model.module if hasattr(self.model, "module") else self.model
         n_params = sum(p.numel() for p in model_obj.parameters())
         n_trainable = sum(p.numel() for p in model_obj.parameters() if p.requires_grad)
-        full_config["n_params"] = n_params
-        full_config["n_trainable_params"] = n_trainable
+
+        runtime_updates = {
+            "derived": {
+                "target_budget": target_budget,
+                "run_name": run_name,
+                "group": group,
+                "world_size": self.world_size,
+                "effective_batch_size": self.batch_size * self.world_size * self.grad_accum_steps,
+                "tokens_per_step": self.tokens_per_step,
+                "grad_accum_steps": self.grad_accum_steps,
+                "warmup_steps": self.warmup_steps,
+                "max_steps": self.max_steps,
+            },
+            "model_stats": {
+                "n_params": n_params,
+                "n_trainable_params": n_trainable,
+            },
+        }
 
         if self.run_metadata:
-            full_config["data_config"] = self.run_metadata.get("data_config", {})
-            full_config["training_config"] = self.run_metadata.get("training_config", {})
-            full_config["validation_config"] = self.run_metadata.get("validation_config", {})
-            full_config["environment"] = self.run_metadata.get("environment", {})
-            full_config["cli_args"] = self.run_metadata.get("cli_args", {})
-        wandb.config.update(full_config, allow_val_change=True)
+            runtime_updates["metadata"] = {
+                "environment": self.run_metadata.get("environment", {}),
+                "cli_args": self.run_metadata.get("cli_args", {}),
+                "tokenizer_name": self.run_metadata.get("tokenizer_name", "nanochat"),
+            }
+        wandb.config.update(runtime_updates, allow_val_change=True)
 
     def finish_wandb(self):
         """Finish wandb run."""
