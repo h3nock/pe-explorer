@@ -14,7 +14,7 @@ tiny:  # ~59M params
   max_seq_len: 1024
   max_token_budget: 2_400_000_000
   batch_size: 64
-  learning_rate: 6.0e-4
+  learning_rate: 4.0e-4
   target_budgets: [1_200_000_000, 2_400_000_000]  # 20N, 40N
 
 small:  # ~164M params
