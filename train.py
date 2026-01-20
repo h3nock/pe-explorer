@@ -254,12 +254,14 @@ def main():
     effective_batch_size = batch_size * world_size * args.grad_accum_steps
     tokens_per_step = effective_batch_size * max_seq_len
     
-    # dynamic warmup: min(config value, 3% of total steps) unless explicitly overridden
+    # warmup steps: CLI > config > default (5% of total steps, capped at 2000)
     max_train_steps = max_token_budget // tokens_per_step
     if args.warmup_steps is not None:
+        warmup_steps = args.warmup_steps
+    elif training_config.get("warmup_steps") is not None:
         warmup_steps = training_config["warmup_steps"]
     else:
-        warmup_steps = min(training_config.get("warmup_steps", 2000), int(0.03 * max_train_steps))
+        warmup_steps = min(int(0.05 * max_train_steps), 2000)
     training_config["warmup_steps"] = warmup_steps
     
     # effective config for logging (single source of truth)
