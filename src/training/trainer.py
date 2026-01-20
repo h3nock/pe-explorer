@@ -89,6 +89,7 @@ class Trainer:
         self.target_checkpoints = []
         self.resume_checkpoint_path = None  # path to checkpoint we resumed from
         self.wandb_buffer = []  # metrics buffer, flushed to disk at checkpoints
+        self.mfu_ema = 0.0  # EMA-smoothed MFU for stable logging
 
         if torch.cuda.is_available():
             self.device = torch.device(f"cuda:{local_rank}")
@@ -286,22 +287,29 @@ class Trainer:
         return stats
 
     def estimate_mfu(self, tokens_per_sec: float) -> float:
-        """Estimate Model FLOPs Utilization as percentage of peak GPU performance."""
+        """Estimate Model FLOPs Utilization as percentage of peak single-GPU performance.
+        
+        FLOPs formula adapted from PaLM paper Appendix B, adjusted for SwiGLU. 
+        """
         model_obj = self.model.module if hasattr(self.model, 'module') else self.model
         config = getattr(model_obj, 'config', None)
         if config is None:
             return 0.0
 
-        N, d, V, d_ff = config.n_layers, config.d_model, config.vocab_size, config.d_ff
+        L, d, d_ff, V, T = config.n_layers, config.d_model, config.d_ff, config.vocab_size, config.max_seq_len
 
-        # FLOPs per token (x3 for forward+backward)
-        flops_per_token = (12 * N * d * d + 8 * N * d * d_ff + 2 * d * V) * 3
+        # FLOPs per token (forward only)
+        attn_flops = 8 * d * d + 4 * T * d    # projections + attention matrix ops
+        mlp_flops = 6 * d * d_ff               # SwiGLU: 3 projections
+        lm_head_flops = 2 * d * V
+        
+        flops_per_token = (L * (attn_flops + mlp_flops) + lm_head_flops) * 3
         achieved_flops = tokens_per_sec * flops_per_token
 
-        # peak FLOPs by GPU type
-        peak_flops = 100e12  # default
+        # peak FLOPs by GPU type (BF16/FP16 tensor core)
+        peak_flops = 100e12
         if torch.cuda.is_available():
-            gpu = torch.cuda.get_device_name(self.device).lower()
+            gpu = torch.cuda.get_device_name(torch.cuda.current_device()).lower()
             peak_map = {
                 'a100': 312e12, 'h100': 989e12, 'v100': 125e12,
                 '4090': 165e12, '3090': 71e12, 'l40': 181e12
@@ -695,9 +703,10 @@ class Trainer:
                         avg_loss = global_loss_sum / global_steps if global_steps > 0 else 0.0
 
                     if self.rank == 0:
-                        # calculate per-GPU MFU
+                        # calculate per-GPU MFU with EMA smoothing
                         tokens_per_sec_per_gpu = tokens_per_sec / self.world_size
-                        mfu = self.estimate_mfu(tokens_per_sec_per_gpu)
+                        raw_mfu = self.estimate_mfu(tokens_per_sec_per_gpu)
+                        self.mfu_ema = 0.9 * self.mfu_ema + 0.1 * raw_mfu
 
                         # core training metrics
                         metrics = {
@@ -712,7 +721,7 @@ class Trainer:
                             "train/samples_seen": self.samples_seen,
                             "train/tokens_per_step": self.tokens_per_step,
                             "train/progress_pct": (self.step / self.max_steps) * 100 if self.max_steps > 0 else 0,
-                            "train/mfu": mfu,
+                            "train/mfu": self.mfu_ema,
                             "param/weight_norm": weight_norm,
                         }
 
