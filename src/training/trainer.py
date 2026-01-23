@@ -241,50 +241,6 @@ class Trainer:
         if self.rank == 0:
             wandb.finish()
 
-    @torch.no_grad()
-    def compute_logit_stats(self, logits: torch.Tensor) -> dict:
-        """Compute logit statistics for stability monitoring."""
-        flat_logits = logits[:, ::8, :].reshape(-1, logits.size(-1))  # sample every 8th token
-
-        probs = F.softmax(flat_logits, dim=-1)
-        entropy = -(probs * torch.log(probs + 1e-9)).sum(dim=-1).mean()
-
-        return {
-            "train/logits_mean": flat_logits.mean().item(),
-            "train/logits_std": flat_logits.std().item(),
-            "train/logits_min": flat_logits.min().item(),
-            "train/logits_max": flat_logits.max().item(),
-            "train/entropy": entropy.item(),
-        }
-
-    def compute_gradient_stats(self) -> dict:
-        """Compute per-layer gradient norms and aggregate statistics."""
-        model_obj = self.model.module if hasattr(self.model, 'module') else self.model
-        stats = {}
-
-        # per-layer gradient norms
-        for i, block in enumerate(model_obj.blocks):
-            block_grad_norm = sum(
-                p.grad.data.norm(2).item() ** 2 for p in block.parameters() if p.grad is not None
-            ) ** 0.5
-            if block_grad_norm > 0:
-                stats[f"grad/layer_{i}_norm"] = block_grad_norm
-
-        # aggregate stats
-        all_grads = [p.grad.data.view(-1) for p in model_obj.parameters() if p.grad is not None]
-        if all_grads:
-            flat_grads = torch.cat(all_grads)
-            flat_params = torch.cat([p.data.view(-1) for p in model_obj.parameters() if p.grad is not None])
-
-            stats["grad/mean"] = flat_grads.mean().item()
-            stats["grad/std"] = flat_grads.std().item()
-            stats["grad/max"] = flat_grads.abs().max().item()
-
-            param_norm = flat_params.norm(2).item()
-            if param_norm > 0:
-                stats["grad/update_norm_ratio"] = flat_grads.norm(2).item() / param_norm
-
-        return stats
 
     def estimate_mfu(self, tokens_per_sec: float) -> float:
         """Estimate Model FLOPs Utilization as percentage of peak single-GPU performance.
@@ -509,7 +465,7 @@ class Trainer:
 
         return checkpoint
     
-    def train_step(self, x: torch.Tensor, y: torch.Tensor, compute_grad_stats: bool = False) -> tuple[float, float, float, bool, float, dict]:
+    def train_step(self, x: torch.Tensor, y: torch.Tensor) -> tuple[float, float, float, bool, float]:
         """Single training step with gradient accumulation.
 
         note: self.step counts optimizer updates (not iterations).
@@ -517,31 +473,23 @@ class Trainer:
         Args:
             x: Input tensor
             y: Target tensor
-            compute_grad_stats: If True, compute per-layer gradient stats before zeroing gradients
 
         Returns:
             loss: The loss value for this micro-batch (unscaled by grad_accum)
-            grad_norm: Gradient norm after clipping (0 if no optimizer step)
+            grad_norm: Gradient norm before clipping (0 if no optimizer step)
             weight_norm: L2 norm of all parameters (0 if no optimizer step)
             did_step: True if optimizer step was taken
             lr_used: Learning rate actually used for this step (0 if no optimizer step)
-            grad_stats: Per-layer gradient statistics (empty dict if not computed)
         """
         x, y = x.to(self.device), y.to(self.device)
-        logit_stats = {}
 
         if self.device.type == "cuda":
             with autocast("cuda", dtype=self.dtype):
                 logits = self.model(x)
                 loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
-                # compute logit stats for stability monitoring (before backward)
-                if compute_grad_stats:
-                    logit_stats = self.compute_logit_stats(logits)
         else:
             logits = self.model(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
-            if compute_grad_stats:
-                logit_stats = self.compute_logit_stats(logits)
 
         loss = loss / self.grad_accum_steps
 
@@ -554,7 +502,6 @@ class Trainer:
         weight_norm = 0.0
         did_step = False
         lr_used = 0.0
-        grad_stats = logit_stats  # start with logit stats, will add gradient stats later
 
         self.micro_step += 1
 
@@ -577,15 +524,11 @@ class Trainer:
             with torch.no_grad():
                 weight_norm = sum(p.norm(2).item() ** 2 for p in self.model.parameters()) ** 0.5
 
-            # compute per-layer gradient stats before zeroing (this is expensive, so only when requested)
-            if compute_grad_stats:
-                grad_stats.update(self.compute_gradient_stats())
-
             self.optimizer.zero_grad()
             self.step += 1  # step = optimizer update count
             did_step = True
 
-        return loss.item() * self.grad_accum_steps, grad_norm, weight_norm, did_step, lr_used, grad_stats
+        return loss.item() * self.grad_accum_steps, grad_norm, weight_norm, did_step, lr_used
     
     @torch.no_grad()
     def validate(self, dataloader) -> float:
@@ -634,10 +577,6 @@ class Trainer:
         step_loss = 0.0
         last_lr_used = 0.0 
 
-        # timing accumulators (for time/* metrics)
-        dt_data_accum = 0.0
-        dt_step_accum = 0.0
-        timing_count = 0
 
         if self.rank == 0:
             print(f"\n{'='*60}")
@@ -651,24 +590,9 @@ class Trainer:
             print(f"  Checkpoint dir: {self.checkpoint_dir}")
             print(f"{'='*60}\n")
 
-        t_data_start = time.time()
-        last_grad_stats = {}  # store gradient stats for logging
         for x, y in dataloader:
-            t_data_end = time.time()
-            dt_data_accum += (t_data_end - t_data_start) * 1000  # ms
+            loss, grad_norm, weight_norm, did_step, lr_used = self.train_step(x, y)
 
-            # compute gradient stats only on steps that will be logged to avoid overhead
-            should_compute_grad_stats = ((self.step + 1) % log_interval == 0)
-            t_step_start = time.time()
-            loss, grad_norm, weight_norm, did_step, lr_used, grad_stats = self.train_step(
-                x, y, compute_grad_stats=should_compute_grad_stats
-            )
-            t_step_end = time.time()
-            dt_step_accum += (t_step_end - t_step_start) * 1000  # ms
-            timing_count += 1
-
-            if grad_stats:
-                last_grad_stats = grad_stats
 
             step_loss += loss  # accumulate across grad_accum iterations
             current_tokens = x.numel() * self.world_size
@@ -747,24 +671,11 @@ class Trainer:
                         if self.scaler is not None:
                             metrics["train/loss_scale"] = self.scaler.get_scale()
 
-                        # timing breakdown
-                        if timing_count > 0:
-                            metrics["time/data_ms"] = dt_data_accum / timing_count
-                            metrics["time/step_ms"] = dt_step_accum / timing_count
-
-                        # per-layer gradient stats
-                        if last_grad_stats:
-                            metrics.update(last_grad_stats)
-
                         self.log_wandb(metrics, self.consumed_tokens)
 
-                    # reset accumulators
                     accum_loss = 0.0
                     steps_since_log = 0
                     tokens_since_log = 0
-                    dt_data_accum = 0.0
-                    dt_step_accum = 0.0
-                    timing_count = 0
                     start_time = time.time()
                 
                 # validation

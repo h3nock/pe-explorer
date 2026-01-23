@@ -72,7 +72,7 @@ def test_trainer_step():
     x = torch.randint(0, 1000, (4, 32))  # batch=4, seq=32
     y = torch.randint(0, 1000, (4, 32))
     
-    loss, grad_norm, weight_norm, did_step = trainer.train_step(x, y)
+    loss, grad_norm, weight_norm, did_step, lr_used = trainer.train_step(x, y)
     
     assert isinstance(loss, float)
     assert isinstance(grad_norm, float)
@@ -102,12 +102,12 @@ def test_grad_accumulation():
     
     # step 1-3: this should NOT increment step
     for i in range(GRAD_ACCUM - 1):
-        loss, _, _, _ = trainer.train_step(x, y)
+        loss, _, _, did_step, _ = trainer.train_step(x, y)
         assert trainer.step == 0
         assert trainer.micro_step == i + 1
         
     # step 4: should increment step
-    loss, _, _, _ = trainer.train_step(x, y)
+    loss, _, _, did_step, _ = trainer.train_step(x, y)
     assert trainer.step == 1
     assert trainer.micro_step == GRAD_ACCUM
     print(f"Gradient accumulation test passed (steps: {GRAD_ACCUM})")
