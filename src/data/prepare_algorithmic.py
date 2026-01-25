@@ -24,6 +24,7 @@ from src.data.prepare_fineweb import DEFAULT_FILLER_SHARDS, extract_shard_index
 from src.data.tokenization import (
     ShardWriter, Tokenizer, load_encoding, get_bos_token_id, get_dtype_str
 )
+from src.utils import set_seed
 
 
 SHARD_SIZE = 100_000_000  # 100M tokens per shard
@@ -219,9 +220,6 @@ def build_filler_pool(
     print(f"Saved {num_docs:,} docs ({total_tokens:,} tokens) to {output_dir}/")
 
 
-def set_seed(seed: int):
-    random.seed(seed)
-
 def sample_length(length_range: list[int]) -> int:
     return random.randint(length_range[0], length_range[1])
 
@@ -401,6 +399,32 @@ def generate_length_task(task: str, cfg: dict, content_sampling: dict, mode: str
         "length": length,
         "token_ids": _prepend_bos(_get_enc().encode(f"{fmt}: {input_text} -> {output_text}")),
     }
+
+class AlgorithmicGenerator:
+    """Wrapper class for generating algorithmic task samples."""
+
+    def __init__(self, eval_config):
+        """Initialize generator with EvalConfig.
+
+        Args:
+            eval_config: EvalConfig instance with tasks, filler_pool_path, etc.
+        """
+        self.config = {
+            "tasks": eval_config.tasks,
+            "content_sampling": eval_config.content_sampling,
+            "context_len": eval_config.context_len,
+            "eval_context_len": eval_config.eval_context_len,
+            "L": eval_config.context_len,
+        }
+
+        # load filler pool if path provided
+        if eval_config.filler_pool_path and Path(eval_config.filler_pool_path).exists():
+            self.config["filler_pool"] = FillerPool(Path(eval_config.filler_pool_path))
+
+    def generate_one(self, task: str, mode: str = "id", overrides: dict | None = None) -> dict:
+        """Generate a single sample for the given task and mode."""
+        return _generate_one(task, self.config, mode, overrides)
+
 
 def _generate_one(task: str, config: dict, mode: str, overrides: dict | None = None) -> dict:
     cfg = config["tasks"][task]
