@@ -160,7 +160,8 @@ class BaseEvaluator(ABC):
         model.load_state_dict(state_dict)
 
         metadata = checkpoint.get("run_metadata", {})
-        print(f"  Model loaded: {config.n_params / 1e6:.1f}M params on {self.device}")
+        n_params = sum(p.numel() for p in model.parameters())
+        print(f"  Model loaded: {n_params / 1e6:.1f}M params on {self.device}")
 
         return model, config, metadata
 
