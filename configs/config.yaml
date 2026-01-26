@@ -114,8 +114,8 @@ data:
   mix_ratio:
     # ratios are fractions (e.g., 0.9 not 90); interleaving is deterministic and
     # caps total samples to the smallest dataset relative to its weight. ensure each dataset has enough samples for its share of the run.
-    fineweb: 0.9
-    algorithmic: 0.1
+    fineweb: 0.7
+    algorithmic: 0.3
   algorithmic:
     train_path: "data/algorithmic/train.parquet"
     eval_path: "data/algorithmic/eval.parquet"
