@@ -189,8 +189,8 @@ class InterleavedDataset(Dataset):
         self.weights = weights
         self.total_weight = sum(weights)
         
-        # calculate max possible cycles determined by the most constrained dataset
-        self.num_cycles = min(len(d) // w for d, w in zip(datasets, weights))
+        # calculate max possible cycles determined by the LARGEST dataset to prevent truncation
+        self.num_cycles = max((len(d) + w - 1) // w for d, w in zip(datasets, weights))
         self.total_samples = self.num_cycles * self.total_weight
         
         # precompute per-cycle offsets for O(1) random access
@@ -221,7 +221,7 @@ class InterleavedDataset(Dataset):
         local_offset = offset_in_cycle - prev_weight_sum
         
         local_idx = cycle_idx * self.weights[dataset_idx] + local_offset
-        return self.datasets[dataset_idx][local_idx]
+        return self.datasets[dataset_idx][local_idx % len(self.datasets[dataset_idx])]
 
 
 
