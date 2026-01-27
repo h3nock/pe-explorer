@@ -1,193 +1,156 @@
 #!/usr/bin/env python3
 """
-Evaluation CLI
+PE-Explorer Evaluation Suite
 
-Unified entry point for running all evaluations on a trained model checkpoint.
-
-Usage:
-    # Run all evaluations
-    python eval.py --checkpoint checkpoints/tiny_sinusoidal/final.pt
-    
-    # Run specific tier
-    python eval.py --checkpoint <path> --tier 2
-    
-    # Run specific task
-    python eval.py --checkpoint <path> --task algorithmic
-    python eval.py --checkpoint <path> --task ppl --dataset pg19 --context 4096
-    python eval.py --checkpoint <path> --task passkey --context 4096
+Run evaluation on trained models:
+    python eval.py --checkpoint checkpoints/model.pt --tasks algorithmic,ppl
+    python eval.py --checkpoint checkpoints/model.pt --tasks all
 """
 
 import argparse
-import json
+import sys
 from pathlib import Path
-from datetime import datetime
+
+import wandb
 
 from src.evaluation.eval_algorithmic import AlgorithmicEvaluator
 from src.evaluation.eval_ppl import PPLEvaluator
-from src.evaluation.eval_passkey import PasskeyEvaluator
-from src.evaluation.eval_niah import NIAHEvaluator
 
 
-TIER_TASKS = {
-    1: ["ppl"],
-    2: ["algorithmic"],
-    3: ["passkey", "niah"],
+# task registry: maps task names to evaluator classes
+EVALUATORS = {
+    "algorithmic": AlgorithmicEvaluator,
+    "ppl": PPLEvaluator,
 }
 
-
-def run_evaluation(args) -> dict:
-    """Run specified evaluations and return combined results."""
-    results = {
-        "checkpoint": str(args.checkpoint),
-        "timestamp": datetime.now().isoformat(),
-    }
-    
-    tasks_to_run = []
-    
-    if args.tier:
-        tasks_to_run = TIER_TASKS.get(args.tier, [])
-    elif args.task:
-        tasks_to_run = [args.task]
-    else:
-        # Run all
-        for tier_tasks in TIER_TASKS.values():
-            tasks_to_run.extend(tier_tasks)
-    
-    print(f"\n{'='*60}")
-    print(f"EVALUATION PIPELINE")
-    print(f"Checkpoint: {args.checkpoint}")
-    print(f"Tasks: {tasks_to_run}")
-    print(f"{'='*60}\n")
-    
-    # Run evaluations
-    if "ppl" in tasks_to_run:
-        print("\n" + "="*40)
-        print("TIER 1: Perplexity Evaluation")
-        print("="*40)
-        evaluator = PPLEvaluator(checkpoint_path=args.checkpoint, config_path=args.config)
-        ppl_results = evaluator.evaluate(
-            dataset=args.dataset or "wikitext103",
-            context_lengths=args.context,
-            max_tokens=args.max_tokens or 1_000_000,
-        )
-        results.update({k: v for k, v in ppl_results.items() if k.startswith("ppl_")})
-        for key in ("dataset", "train_max_seq_len"):
-            if key in ppl_results:
-                results[f"ppl_{key}"] = ppl_results[key]
-    
-    if "algorithmic" in tasks_to_run:
-        print("\n" + "="*40)
-        print("TIER 2: Algorithmic Evaluation")
-        print("="*40)
-        evaluator = AlgorithmicEvaluator(checkpoint_path=args.checkpoint, config_path=args.config)
-        
-        # Zero-shot
-        alg_results = evaluator.evaluate(use_few_shot=False, verbose=args.verbose)
-        results.update({f"zeroshot_{k}": v for k, v in alg_results.items() 
-                       if "_accuracy" in k or "_correct" in k})
-        
-        # Few-shot
-        if args.few_shot:
-            alg_results_fs = evaluator.evaluate(use_few_shot=True, verbose=args.verbose)
-            results.update({f"fewshot_{k}": v for k, v in alg_results_fs.items() 
-                           if "_accuracy" in k or "_correct" in k})
-    
-    if "passkey" in tasks_to_run:
-        print("\n" + "="*40)
-        print("TIER 3: Passkey Retrieval")
-        print("="*40)
-        evaluator = PasskeyEvaluator(checkpoint_path=args.checkpoint, config_path=args.config)
-        pk_results = evaluator.evaluate(
-            context_lengths=args.context,
-            samples_per_context=args.samples or 100,
-        )
-        results.update({k: v for k, v in pk_results.items() if k.startswith("passkey_")})
-    
-    if "niah" in tasks_to_run:
-        print("\n" + "="*40)
-        print("TIER 3: Needle-in-a-Haystack Sweep")
-        print("="*40)
-        evaluator = NIAHEvaluator(checkpoint_path=args.checkpoint, config_path=args.config)
-        niah_results = evaluator.evaluate(
-            context_lengths=args.context,
-            samples_per_cell=args.samples or 20,
-        )
-        results.update({k: v for k, v in niah_results.items() if k.startswith("niah_")})
-    
-    return results
+ALL_TASKS = list(EVALUATORS.keys())
 
 
-def main():
+def parse_args():
     parser = argparse.ArgumentParser(
-        description="Unified evaluation CLI for PE Benchmark",
+        description="PE-Explorer Evaluation Suite",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    python eval.py --checkpoint ckpt.pt --tier 2        # Algorithmic only
-    python eval.py --checkpoint ckpt.pt --task ppl     # PPL only
-    python eval.py --checkpoint ckpt.pt                 # All evaluations
+  python eval.py --checkpoint checkpoints/model.pt --tasks algorithmic
+  python eval.py --checkpoint checkpoints/model.pt --tasks ppl
+  python eval.py --checkpoint checkpoints/model.pt --tasks all --wandb
         """,
     )
-    
-    # Required
-    parser.add_argument("--checkpoint", type=str, required=True,
-                       help="Path to model checkpoint")
-    parser.add_argument("--config", type=str, default=None,
-                       help="Path to config YAML if not embedded in checkpoint")
-    
-    # Task selection
-    parser.add_argument("--tier", type=int, choices=[1, 2, 3],
-                       help="Run all tasks in specified tier")
-    parser.add_argument("--task", type=str,
-                       choices=["ppl", "algorithmic", "passkey", "niah"],
-                       help="Run specific task")
-    
-    # Task-specific options
-    parser.add_argument("--dataset", type=str, choices=["wikitext103", "pg19"],
-                       help="Dataset for PPL evaluation")
-    parser.add_argument("--context", type=int, nargs="+",
-                       help="Context lengths to test")
-    parser.add_argument("--few-shot", action="store_true",
-                       help="Include few-shot evaluation for algorithmic")
-    parser.add_argument("--verbose", action="store_true",
-                       help="Print per-example outputs for algorithmic eval")
-    parser.add_argument("--max-tokens", type=int,
-                       help="Max tokens for PPL evaluation")
-    parser.add_argument("--samples", type=int,
-                       help="Samples per context for passkey")
-    
-    # Output
-    parser.add_argument("--output", type=str, 
-                       help="Output JSON path (default: results/<checkpoint_name>.json)")
-    
-    args = parser.parse_args()
-    
-    # Run evaluations
-    results = run_evaluation(args)
-    
-    # Print summary
-    print("\n" + "="*60)
-    print("FINAL RESULTS SUMMARY")
-    print("="*60)
-    for key, value in sorted(results.items()):
-        if key in ["checkpoint", "timestamp"]:
-            continue
-        if isinstance(value, float):
-            print(f"  {key}: {value:.4f}")
-        else:
-            print(f"  {key}: {value}")
-    
-    # Save results
-    if args.output:
-        output_path = Path(args.output)
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        required=True,
+        help="Path to model checkpoint",
+    )
+    parser.add_argument(
+        "--tasks",
+        type=str,
+        default="all",
+        help=f"Comma-separated tasks: {', '.join(ALL_TASKS)}, or 'all'",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="eval_results",
+        help="Directory to save results (default: eval_results)",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        help="Device to use: cuda, mps, or cpu (default: cuda)",
+    )
+    parser.add_argument(
+        "--wandb",
+        action="store_true",
+        help="Log results to Weights & Biases",
+    )
+    parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=None,
+        help="Number of samples to evaluate. Defaults: 1000 (PPL), config (Algo).",
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    # validate checkpoint
+    checkpoint_path = Path(args.checkpoint)
+    if not checkpoint_path.exists():
+        print(f"Error: Checkpoint not found: {checkpoint_path}")
+        sys.exit(1)
+
+    # parse tasks
+    if args.tasks.lower() == "all":
+        tasks = ALL_TASKS
     else:
-        ckpt_name = Path(args.checkpoint).stem
-        output_path = Path("results") / f"eval_{ckpt_name}.json"
-    
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w") as f:
-        json.dump(results, f, indent=2)
-    print(f"\nResults saved to: {output_path}")
+        tasks = [t.strip() for t in args.tasks.split(",")]
+        unknown = set(tasks) - set(EVALUATORS.keys())
+        if unknown:
+            print(f"Error: Unknown task(s): {unknown}")
+            print(f"Available: {', '.join(EVALUATORS.keys())}")
+            sys.exit(1)
+
+    # initialize WandB if requested
+    if args.wandb:
+        run_name = f"eval_{checkpoint_path.stem}"
+        wandb.init(project="pe-explorer", name=run_name, job_type="eval")
+
+    print(f"Evaluating: {checkpoint_path}")
+    print(f"Tasks: {', '.join(tasks)}")
+    print(f"Device: {args.device}")
+    print(f"Output: {args.output_dir}")
+    print()
+
+    # run evaluations
+    all_results = {}
+
+    for task_name in tasks:
+        print(f"\n{'=' * 50}")
+        print(f"  {task_name.upper()} EVALUATION")
+        print(f"{'=' * 50}")
+
+        evaluator_cls = EVALUATORS[task_name]
+        evaluator = evaluator_cls(
+            checkpoint_path=str(checkpoint_path),
+            device=args.device,
+            output_dir=args.output_dir,
+        )
+
+        run_kwargs = {}
+        if args.num_samples is not None:
+            run_kwargs["num_samples"] = args.num_samples
+
+        results = evaluator.run(**run_kwargs)
+        all_results[task_name] = results
+
+    # summary
+    print(f"\n{'=' * 50}")
+    print("  SUMMARY")
+    print(f"{'=' * 50}")
+    for task_name, results in all_results.items():
+        print(f"\n{task_name}:")
+        if isinstance(results, dict):
+            for key, value in results.items():
+                if isinstance(value, dict):
+                    for k, v in value.items():
+                        if isinstance(v, float):
+                            print(f"  {key}/{k}: {v:.4f}")
+                        else:
+                            print(f"  {key}/{k}: {v}")
+                elif isinstance(value, float):
+                    print(f"  {key}: {value:.4f}")
+                else:
+                    print(f"  {key}: {value}")
+
+    if args.wandb:
+        wandb.finish()
+
+    print(f"\nResults saved to: {args.output_dir}/")
 
 
 if __name__ == "__main__":
