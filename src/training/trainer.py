@@ -728,9 +728,6 @@ class Trainer:
                 if self.step >= self.max_steps:
                     break
 
-            # reset data timer for next iteration
-            t_data_start = time.time()
-
         # save final checkpoint
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         self.save_checkpoint(f"{self.checkpoint_dir}/final.pt", dataloader)
